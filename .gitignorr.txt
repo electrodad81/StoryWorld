@@ -1,0 +1,6 @@
+*.pyc
+__pycache__/
+.storyworld.db
+.streamlit/secrets.toml
+.venv/
+.env
