@@ -651,8 +651,7 @@ def main():
             st.session_state.hydrated_once = True   # <- prevents auto-hydrate on next run
             st.session_state.is_generating = False
             st.session_state.pending_choice = None
-            st.experimental_rerun()
-
+            st.rerun()
 
     # Hydrate from DB only once, and only if BOTH are empty and we're not generating
     #if not st.session_state.get("hydrated_once", False) and not st.session_state.get("is_generating", False):
@@ -690,7 +689,7 @@ def main():
                         st.session_state.pending_choice = choice
                         st.session_state.is_generating = True
                         st.session_state.choice_list = []
-                        st.experimental_rerun()
+                        st.rerun()
         else:
             label = "Generating..." if generating else "Start New Story → sidebar"
             for i in range(n):
