@@ -11,16 +11,26 @@ from typing import Any, Dict, List, Optional
 from json import JSONDecodeError
 
 import streamlit as st
+APP_TITLE = "Gloamreach — Storyworld MVP"
+st.set_page_config(page_title=APP_TITLE, page_icon="🕯️", layout="centered")
+
 from openai import OpenAI
 
 # near the top of app.py
 from pathlib import Path
+# import cooky stuff
+import secrets
+try:
+    from streamlit_cookies_controller import CookieController
+except Exception:
+    CookieController = None
+
+
 BASE_DIR = Path(__file__).parent.resolve()
 
 # -------------------------
 # Constants / Paths
 # -------------------------
-APP_TITLE = "Gloamreach — Storyworld MVP"
 DB_PATH   = BASE_DIR / "storyworld.db"
 LORE_PATH = BASE_DIR / "lore.json"
 
@@ -175,9 +185,8 @@ def fix_inconsistent_state() -> None:
         else:
             # No corresponding scene in DB → clear stray choices
             st.session_state.choice_list = []
-
 # -------------------------
-# DB helpers
+# DB helpers (player-aware)
 # -------------------------
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -189,37 +198,100 @@ def init_db():
             choices TEXT
         )
     """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS story_progress (
+            user_id   TEXT PRIMARY KEY,
+            scene     TEXT,
+            choices   TEXT,
+            history   TEXT,
+            updated_at TEXT
+        )
+    """)
     conn.commit()
     conn.close()
 
+
 def save_state(scene: str, choices: List[str]) -> None:
+    """
+    Save the latest scene/choices (and full history) for the current player_id.
+    Also writes to the legacy story_state table for easy manual inspection.
+    """
+    user_id = st.session_state.get("player_id") or "_shared_"
     conn = sqlite3.connect(DB_PATH)
     try:
+        # Legacy append (optional, harmless)
         conn.execute(
             "INSERT INTO story_state(scene, choices) VALUES (?, ?)",
-            (scene, json.dumps(choices, ensure_ascii=False))
+            (scene, json.dumps(choices, ensure_ascii=False)),
+        )
+
+        # Per-user upsert
+        conn.execute(
+            """
+            INSERT INTO story_progress(user_id, scene, choices, history, updated_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(user_id) DO UPDATE SET
+              scene      = excluded.scene,
+              choices    = excluded.choices,
+              history    = excluded.history,
+              updated_at = excluded.updated_at
+            """,
+            (
+                user_id,
+                scene,
+                json.dumps(choices, ensure_ascii=False),
+                json.dumps(st.session_state.get("history", []), ensure_ascii=False),
+            ),
         )
         conn.commit()
     finally:
         conn.close()
 
+
 def load_last_state() -> tuple[Optional[str], Optional[List[str]]]:
+    """
+    Load the saved scene/choices for the current player_id (cookie-backed).
+    Falls back to the most recent legacy row if the player has no save yet.
+    """
     if not DB_PATH.exists():
         return None, None
+
+    user_id = st.session_state.get("player_id") or "_shared_"
     conn = sqlite3.connect(DB_PATH)
     try:
+        # Try player-scoped save first
+        cur = conn.execute(
+            "SELECT scene, choices FROM story_progress WHERE user_id = ?",
+            (user_id,),
+        )
+        row = cur.fetchone()
+        if row:
+            scene, choices_json = row
+            try:
+                return scene, json.loads(choices_json)
+            except Exception:
+                return scene, None
+
+        # Fallback to most recent legacy row
         cur = conn.execute("SELECT scene, choices FROM story_state ORDER BY id DESC LIMIT 1")
         row = cur.fetchone()
-        if not row:
-            return None, None
-        scene, choices_json = row
-        try:
-            choices = json.loads(choices_json)
-        except Exception:
-            choices = None
-        return scene, choices
+        if row:
+            scene, choices_json = row
+            try:
+                return scene, json.loads(choices_json)
+            except Exception:
+                return scene, None
+
+        return None, None
     finally:
         conn.close()
+
+def delete_player_progress(user_id: str) -> None:
+    """Optional: remove one player's save row (used by 'Reset this browser’s story')."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM story_progress WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
 
 # -------------------------
 # LLM calls (stream + choices)
@@ -448,7 +520,7 @@ def trim_history(n_turns: int = 8) -> None:
         return
     st.session_state.history = hist[-n_turns:]
 
-import re  # (you likely already import this)
+#import re  # (you likely already import this)
 
 def _canon(text: str) -> str:
     """Canonicalize for de-duplication (case/punct/space insensitive)."""
@@ -519,7 +591,37 @@ def sanitize_history(max_turns: int = 10) -> None:
 # Streamlit UI
 # -------------------------
 def main():
-    st.set_page_config(page_title=APP_TITLE, page_icon="🕯️", layout="centered")
+
+    # Create the cookie controller (hidden UI)
+    cookie = CookieController(key="cookies")
+
+    #st.set_page_config(page_title=APP_TITLE, page_icon="🕯️", layout="centered")
+
+    if CookieController:
+        cookie = CookieController(key="cookies")
+        uid = cookie.get("story_uid")
+        if not uid:
+            uid = secrets.token_hex(16)
+            cookie.set("story_uid", uid, max_age=365*24*60*60, path="/")
+    else:
+        # fallback: per-session id
+        uid = st.session_state.get("player_id") or secrets.token_hex(16)
+
+    if not st.session_state.get("player_id"):
+        st.session_state.player_id = uid
+
+
+    # Get or create a browser-scoped id
+    uid = cookie.get("story_uid")
+    if not uid:
+        uid = secrets.token_hex(16)                   # 128-bit id
+        cookie.set("story_uid", uid, max_age=365*24*60*60, path="/")  # 1 year
+
+    # Make it the default player id for this session
+    if not st.session_state.get("player_id"):
+        st.session_state.player_id = uid
+
+    # Streamlit app configuration
     st.title(APP_TITLE)
 
     # Fresh placeholders per run (safe across reruns)
@@ -591,6 +693,9 @@ def main():
         )
         st.session_state.choice_list = new_choices
         st.session_state.recent_choices = (st.session_state.recent_choices + new_choices)[-30:]
+
+
+
         save_state(narrative, new_choices)
         trim_history(10)
 
