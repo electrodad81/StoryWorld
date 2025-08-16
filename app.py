@@ -13,12 +13,16 @@ from json import JSONDecodeError
 import streamlit as st
 from openai import OpenAI
 
+# near the top of app.py
+from pathlib import Path
+BASE_DIR = Path(__file__).parent.resolve()
+
 # -------------------------
 # Constants / Paths
 # -------------------------
 APP_TITLE = "Gloamreach — Storyworld MVP"
-DB_PATH = Path("storyworld.db")
-LORE_PATH = Path("lore.json")
+DB_PATH   = BASE_DIR / "storyworld.db"
+LORE_PATH = BASE_DIR / "lore.json"
 
 STREAM_MODEL = os.getenv("SCENE_MODEL", "gpt-4o")         # streaming narrative
 SCENE_MODEL  = os.getenv("SCENE_MODEL", "gpt-4o")         # JSON scene (fallback path if ever used)
