@@ -551,6 +551,15 @@ def main():
     st.caption("Live-streamed scenes • Click choices to advance")
     init_db()
 
+    # Debug caption: confirm cookie + DB backend + whether a save exists
+    pid = st.session_state.get("player_id", "")
+    try:
+        backend = get_db().backend
+    except Exception as e:
+        backend = f"error:{type(e).__name__}"
+
+    st.caption(f"Player: {pid[:8]}… • has save: {'yes' if player_has_save(pid) else 'no'} • DB: {backend}")
+
     # Load lore
     if not LORE_PATH.exists():
         st.error("lore.json not found. Please place it next to app_fixed.py.")
