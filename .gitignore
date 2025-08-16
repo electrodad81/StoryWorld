@@ -1,1 +1,9 @@
-/.venv
+# Python build/venv stuff
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Streamlit secrets & local DB
+.streamlit/secrets.toml
+storyworld.db
