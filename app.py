@@ -88,8 +88,8 @@ def _load_openai_key() -> str:
     except Exception:
         pass
     # toml fallback (CWD then script dir)
-    for p in (pathlib.Path(".streamlit/secrets.toml"),
-              pathlib.Path(__file__).with_name(".streamlit").joinpath("secrets.toml")):
+    for p in (Path(".streamlit") / "secrets.toml",
+            Path(__file__).parent / ".streamlit" / "secrets.toml"):
         if p.exists():
             try:
                 try:
@@ -103,6 +103,7 @@ def _load_openai_key() -> str:
                     return key
             except Exception:
                 pass
+
     return ""
 
 
@@ -592,34 +593,33 @@ def sanitize_history(max_turns: int = 10) -> None:
 # -------------------------
 def main():
 
-    # Create the cookie controller (hidden UI)
-    cookie = CookieController(key="cookies")
-
-    #st.set_page_config(page_title=APP_TITLE, page_icon="🕯️", layout="centered")
+    # --- Cookie-backed player id (safe, single instantiation) ---
+    uid = None
+    cookie = None
 
     if CookieController:
-        cookie = CookieController(key="cookies")
-        uid = cookie.get("story_uid")
-        if not uid:
-            uid = secrets.token_hex(16)
-            cookie.set("story_uid", uid, max_age=365*24*60*60, path="/")
+        try:
+            # Reuse one controller instance across reruns
+            cookie = st.session_state.get("_cookie_ctrl")
+            if cookie is None:
+                st.session_state["_cookie_ctrl"] = CookieController(key="browser_cookie")
+                cookie = st.session_state["_cookie_ctrl"]
+
+            # Read/create the browser-scoped id
+            uid = cookie.get("story_uid")
+            if not uid:
+                uid = secrets.token_hex(16)  # 128-bit opaque id
+                cookie.set("story_uid", uid, max_age=365*24*60*60, path="/")  # 1 year
+        except Exception:
+            # Component hiccup: per-session fallback
+            uid = st.session_state.get("player_id") or secrets.token_hex(16)
     else:
-        # fallback: per-session id
+        # Component not installed: per-session fallback
         uid = st.session_state.get("player_id") or secrets.token_hex(16)
 
+    # Set default player_id from cookie on first run
     if not st.session_state.get("player_id"):
-        st.session_state.player_id = uid
-
-
-    # Get or create a browser-scoped id
-    uid = cookie.get("story_uid")
-    if not uid:
-        uid = secrets.token_hex(16)                   # 128-bit id
-        cookie.set("story_uid", uid, max_age=365*24*60*60, path="/")  # 1 year
-
-    # Make it the default player id for this session
-    if not st.session_state.get("player_id"):
-        st.session_state.player_id = uid
+        st.session_state["player_id"] = uid
 
     # Streamlit app configuration
     st.title(APP_TITLE)
@@ -761,15 +761,6 @@ def main():
             st.session_state.is_generating = False
             st.session_state.pending_choice = None
             st.rerun()
-
-    # Hydrate from DB only once, and only if BOTH are empty and we're not generating
-    #if not st.session_state.get("hydrated_once", False) and not st.session_state.get("is_generating", False):
-    #    if not st.session_state.scene_text and not st.session_state.choice_list:
-    #        last_scene, last_choices = load_last_state()
-    #        if last_scene and last_choices:
-    #            st.session_state.scene_text = last_scene
-    #            st.session_state.choice_list = last_choices
-    #    st.session_state.hydrated_once = True
 
     # --- Scene render ---
     if st.session_state.scene_text:
