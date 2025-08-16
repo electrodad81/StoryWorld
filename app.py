@@ -1,7 +1,6 @@
 # Gloamreach — Streamlit MVP (fixed)
 from __future__ import annotations
 
-from http import client
 import os
 import json
 import re
@@ -16,8 +15,6 @@ st.set_page_config(page_title=APP_TITLE, page_icon="🕯️", layout="centered")
 
 from openai import OpenAI
 
-# near the top of app.py
-from pathlib import Path
 # import cooky stuff
 import secrets
 try:
@@ -159,24 +156,17 @@ def show_waiting_choices(container, count: int = 2) -> None:
                 st.button("Generating...", key=f"waiting_{i}", use_container_width=True, disabled=True)
 
 def hydrate_once_not_generating() -> None:
-    """
-    On a fresh run, hydrate scene + choices together from SQLite (only once),
-    never while generating, and ONLY for the current player_id.
-    """
+    """On a fresh run, hydrate scene + choices together from SQLite (only once, never while generating)."""
     if st.session_state.get("hydrated_once", False):
         return
     if st.session_state.get("is_generating", False):
         return
-
-    pid = st.session_state.get("player_id", "")
-    if pid:
-        scene, choices = load_last_state()   # now per-user only
-        if scene and choices:
-            st.session_state.scene_text = scene
-            st.session_state.choice_list = choices
-    # If no pid or no per-user save: leave intro state
+    if not st.session_state.scene_text and not st.session_state.choice_list:
+        last_scene, last_choices = load_last_state()
+        if last_scene and last_choices:
+            st.session_state.scene_text = last_scene
+            st.session_state.choice_list = last_choices
     st.session_state.hydrated_once = True
-
 
 def fix_inconsistent_state() -> None:
     """
@@ -227,6 +217,12 @@ def save_state(scene: str, choices: List[str]) -> None:
     user_id = st.session_state.get("player_id") or "_shared_"
     conn = sqlite3.connect(DB_PATH)
     try:
+        # Legacy append (optional, harmless)
+        conn.execute(
+            "INSERT INTO story_state(scene, choices) VALUES (?, ?)",
+            (scene, json.dumps(choices, ensure_ascii=False)),
+        )
+
         # Per-user upsert
         conn.execute(
             """
@@ -655,7 +651,7 @@ def main():
     try:
         client = get_client()
     except Exception as e:
-        st.error(f"OpenAI client error: {e}")
+        st.exception(e)   # was st.error(...). This prints the full stack to the page.
         st.stop()
 
     ensure_state()
@@ -773,18 +769,18 @@ def main():
             st.session_state.pending_choice = None
             st.rerun()
         
-st.divider()
-pid = st.session_state.get("player_id", "")
-st.caption(
-    f"Player: `{pid[:8]}…` • has save: {'yes' if player_has_save(pid) else 'no'}"
-)
+        st.divider()
+        pid = st.session_state.get("player_id", "")
+        st.caption(
+            f"Player: `{pid[:8]}…` • has save: {'yes' if player_has_save(pid) else 'no'}"
+        )
 
 
-    # --- Scene render ---
-    if st.session_state.scene_text:
-        story_ph.markdown(st.session_state.scene_text)
-    else:
-        story_ph.info("Click **Start New Story** in the sidebar to begin.")
+        # --- Scene render ---
+        if st.session_state.scene_text:
+            story_ph.markdown(st.session_state.scene_text)
+        else:
+            story_ph.info("Click **Start New Story** in the sidebar to begin.")
 
 
     # --- Always-on choices grid (keeps the left column stable every run) ---
@@ -813,8 +809,11 @@ st.caption(
             for i in range(n):
                 with cols[i]:
                     st.button(label, key=f"waiting_{i}", use_container_width=True, disabled=True)
-
-
+                    
+    import sys, openai, httpx
+    st.caption(
+        f"Runtime: {sys.executable} • openai {openai.__version__} • httpx {httpx.__version__}"
+    )
 
 if __name__ == "__main__":
     main()
