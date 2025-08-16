@@ -159,17 +159,24 @@ def show_waiting_choices(container, count: int = 2) -> None:
                 st.button("Generating...", key=f"waiting_{i}", use_container_width=True, disabled=True)
 
 def hydrate_once_not_generating() -> None:
-    """On a fresh run, hydrate scene + choices together from SQLite (only once, never while generating)."""
+    """
+    On a fresh run, hydrate scene + choices together from SQLite (only once),
+    never while generating, and ONLY for the current player_id.
+    """
     if st.session_state.get("hydrated_once", False):
         return
     if st.session_state.get("is_generating", False):
         return
-    if not st.session_state.scene_text and not st.session_state.choice_list:
-        last_scene, last_choices = load_last_state()
-        if last_scene and last_choices:
-            st.session_state.scene_text = last_scene
-            st.session_state.choice_list = last_choices
+
+    pid = st.session_state.get("player_id", "")
+    if pid:
+        scene, choices = load_last_state()   # now per-user only
+        if scene and choices:
+            st.session_state.scene_text = scene
+            st.session_state.choice_list = choices
+    # If no pid or no per-user save: leave intro state
     st.session_state.hydrated_once = True
+
 
 def fix_inconsistent_state() -> None:
     """
@@ -220,12 +227,6 @@ def save_state(scene: str, choices: List[str]) -> None:
     user_id = st.session_state.get("player_id") or "_shared_"
     conn = sqlite3.connect(DB_PATH)
     try:
-        # Legacy append (optional, harmless)
-        conn.execute(
-            "INSERT INTO story_state(scene, choices) VALUES (?, ?)",
-            (scene, json.dumps(choices, ensure_ascii=False)),
-        )
-
         # Per-user upsert
         conn.execute(
             """
@@ -252,28 +253,28 @@ def save_state(scene: str, choices: List[str]) -> None:
 def load_last_state() -> tuple[Optional[str], Optional[List[str]]]:
     """
     Load the saved scene/choices for the current player_id (cookie-backed).
-    Falls back to the most recent legacy row if the player has no save yet.
+    If player_id exists but has no row yet, return (None, None) — no legacy fallback.
+    If player_id is missing (rare), fall back to the legacy last row for compatibility.
     """
     if not DB_PATH.exists():
         return None, None
 
-    user_id = st.session_state.get("player_id") or "_shared_"
+    user_id = st.session_state.get("player_id") or ""
     conn = sqlite3.connect(DB_PATH)
     try:
-        # Try player-scoped save first
-        cur = conn.execute(
-            "SELECT scene, choices FROM story_progress WHERE user_id = ?",
-            (user_id,),
-        )
-        row = cur.fetchone()
-        if row:
-            scene, choices_json = row
-            try:
-                return scene, json.loads(choices_json)
-            except Exception:
-                return scene, None
+        if user_id:
+            # Strict per-user load
+            cur = conn.execute("SELECT scene, choices FROM story_progress WHERE user_id = ?", (user_id,))
+            row = cur.fetchone()
+            if row:
+                scene, choices_json = row
+                try:
+                    return scene, json.loads(choices_json)
+                except Exception:
+                    return scene, None
+            return None, None  # <- no fallback when a player_id exists
 
-        # Fallback to most recent legacy row
+        # No player_id: allow legacy fallback
         cur = conn.execute("SELECT scene, choices FROM story_state ORDER BY id DESC LIMIT 1")
         row = cur.fetchone()
         if row:
@@ -282,8 +283,18 @@ def load_last_state() -> tuple[Optional[str], Optional[List[str]]]:
                 return scene, json.loads(choices_json)
             except Exception:
                 return scene, None
-
         return None, None
+    finally:
+        conn.close()
+
+# Check if a player has a save
+def player_has_save(user_id: str) -> bool:
+    if not DB_PATH.exists() or not user_id:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.execute("SELECT 1 FROM story_progress WHERE user_id = ? LIMIT 1", (user_id,))
+        return cur.fetchone() is not None
     finally:
         conn.close()
 
@@ -761,6 +772,13 @@ def main():
             st.session_state.is_generating = False
             st.session_state.pending_choice = None
             st.rerun()
+        
+st.divider()
+pid = st.session_state.get("player_id", "")
+st.caption(
+    f"Player: `{pid[:8]}…` • has save: {'yes' if player_has_save(pid) else 'no'}"
+)
+
 
     # --- Scene render ---
     if st.session_state.scene_text:
