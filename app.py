@@ -4,10 +4,11 @@ from __future__ import annotations
 import os
 import json
 import re
-import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from json import JSONDecodeError
+
+from db import get_db
 
 import streamlit as st
 APP_TITLE = "Gloamreach — Storyworld MVP"
@@ -28,7 +29,6 @@ BASE_DIR = Path(__file__).parent.resolve()
 # -------------------------
 # Constants / Paths
 # -------------------------
-DB_PATH   = BASE_DIR / "storyworld.db"
 LORE_PATH = BASE_DIR / "lore.json"
 
 STREAM_MODEL = os.getenv("SCENE_MODEL", "gpt-4o")         # streaming narrative
@@ -183,123 +183,33 @@ def fix_inconsistent_state() -> None:
         else:
             # No corresponding scene in DB → clear stray choices
             st.session_state.choice_list = []
+
 # -------------------------
-# DB helpers (player-aware)
+# DB helpers (player-aware) — Neon/SQLite via db.py
 # -------------------------
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS story_state (
-            id INTEGER PRIMARY KEY,
-            scene TEXT,
-            choices TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS story_progress (
-            user_id   TEXT PRIMARY KEY,
-            scene     TEXT,
-            choices   TEXT,
-            history   TEXT,
-            updated_at TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
+    # Ensure schema is present (Postgres if DATABASE_URL, else SQLite)
+    get_db().ensure_schema()
 
-
-def save_state(scene: str, choices: List[str]) -> None:
-    """
-    Save the latest scene/choices (and full history) for the current player_id.
-    Also writes to the legacy story_state table for easy manual inspection.
-    """
+def save_state(scene: str, choices: list[str]) -> None:
     user_id = st.session_state.get("player_id") or "_shared_"
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        # Legacy append (optional, harmless)
-        conn.execute(
-            "INSERT INTO story_state(scene, choices) VALUES (?, ?)",
-            (scene, json.dumps(choices, ensure_ascii=False)),
-        )
+    db = get_db()
+    db.save_progress(user_id, scene, choices, st.session_state.get("history", []))
 
-        # Per-user upsert
-        conn.execute(
-            """
-            INSERT INTO story_progress(user_id, scene, choices, history, updated_at)
-            VALUES (?, ?, ?, ?, datetime('now'))
-            ON CONFLICT(user_id) DO UPDATE SET
-              scene      = excluded.scene,
-              choices    = excluded.choices,
-              history    = excluded.history,
-              updated_at = excluded.updated_at
-            """,
-            (
-                user_id,
-                scene,
-                json.dumps(choices, ensure_ascii=False),
-                json.dumps(st.session_state.get("history", []), ensure_ascii=False),
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def load_last_state() -> tuple[Optional[str], Optional[List[str]]]:
-    """
-    Load the saved scene/choices for the current player_id (cookie-backed).
-    If player_id exists but has no row yet, return (None, None) — no legacy fallback.
-    If player_id is missing (rare), fall back to the legacy last row for compatibility.
-    """
-    if not DB_PATH.exists():
-        return None, None
-
+def load_last_state() -> tuple[Optional[str], Optional[list[str]]]:
     user_id = st.session_state.get("player_id") or ""
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        if user_id:
-            # Strict per-user load
-            cur = conn.execute("SELECT scene, choices FROM story_progress WHERE user_id = ?", (user_id,))
-            row = cur.fetchone()
-            if row:
-                scene, choices_json = row
-                try:
-                    return scene, json.loads(choices_json)
-                except Exception:
-                    return scene, None
-            return None, None  # <- no fallback when a player_id exists
-
-        # No player_id: allow legacy fallback
-        cur = conn.execute("SELECT scene, choices FROM story_state ORDER BY id DESC LIMIT 1")
-        row = cur.fetchone()
-        if row:
-            scene, choices_json = row
-            try:
-                return scene, json.loads(choices_json)
-            except Exception:
-                return scene, None
+    db = get_db()
+    tup = db.load_progress(user_id)
+    if not tup:
         return None, None
-    finally:
-        conn.close()
+    scene, choices, _history = tup
+    return scene, choices
 
-# Check if a player has a save
 def player_has_save(user_id: str) -> bool:
-    if not DB_PATH.exists() or not user_id:
-        return False
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        cur = conn.execute("SELECT 1 FROM story_progress WHERE user_id = ? LIMIT 1", (user_id,))
-        return cur.fetchone() is not None
-    finally:
-        conn.close()
+    return get_db().has_progress(user_id)
 
 def delete_player_progress(user_id: str) -> None:
-    """Optional: remove one player's save row (used by 'Reset this browser’s story')."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("DELETE FROM story_progress WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
+    get_db().delete_progress(user_id)
 
 # -------------------------
 # LLM calls (stream + choices)
