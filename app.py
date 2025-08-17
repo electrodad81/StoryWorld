@@ -1,69 +1,89 @@
+# app.py
 import streamlit as st
-from streamlit_js_eval import streamlit_js_eval
+from core.identity import ensure_browser_id, clear_browser_id_and_reload
+from data.sqlite_store import init_db, load_snapshot, save_snapshot, delete_snapshot, has_snapshot
+from ui.controls import sidebar_controls, scene_and_choices
 
-LS_KEY = "browser_id_v1"
+st.set_page_config(page_title="Gloamreach — Storyworld MVP", layout="wide")
 
-def ensure_browser_id() -> str:
-    """
-    Get a persistent browser id from localStorage, mint if missing.
-    Returns the id and stores it in st.session_state['browser_id'].
-    """
-    # Ask the browser to read/create the ID and return it to Python.
-    bid = streamlit_js_eval(
-        js_expressions=f"""
-            (function(){{
-                const KEY = {LS_KEY!r};
-                let id = window.localStorage.getItem(KEY);
-                if (!id) {{
-                    const buf = new Uint8Array(16);
-                    (window.crypto || window.msCrypto).getRandomValues(buf);
-                    id = Array.from(buf, x => x.toString(16).padStart(2,'0')).join('');
-                    window.localStorage.setItem(KEY, id);
-                }}
-                return id;
-            }})();
-        """,
-        key="get_browser_id",
-    )
+INTRO_SCENE = (
+    "In the land of Gloamreach, the sun never fully rises, leaving the world draped "
+    "in a curtain of twilight. Mist clings to the cobblestone streets like a whisper..."
+)
+INTRO_CHOICES = ["Follow the creaking rope.", "Explore a shadowed alley."]
 
-    # Fallback if something blocks JS (very rare)
-    if not bid:
-        import uuid
-        bid = st.session_state.get("browser_id") or uuid.uuid4().hex
+def hydrate_once_for(pid: str):
+    """Load snapshot once per pid into session_state."""
+    if st.session_state.get("hydrated_for_pid") == pid:
+        return
+    snap = load_snapshot(pid)
+    if snap:
+        st.session_state["scene"] = snap["scene"]
+        st.session_state["choices"] = snap["choices"]
+        st.session_state["history"] = snap["history"]
+    else:
+        st.session_state["scene"] = None
+        st.session_state["choices"] = []
+        st.session_state["history"] = []
+    st.session_state["hydrated_for_pid"] = pid
 
-    st.session_state["browser_id"] = bid
-    return bid
+def start_new_story(pid: str):
+    st.session_state["scene"] = INTRO_SCENE
+    st.session_state["choices"] = INTRO_CHOICES[:2]
+    st.session_state["history"] = [{"role": "assistant", "content": INTRO_SCENE}]
+    save_snapshot(pid, st.session_state["scene"], st.session_state["choices"], st.session_state["history"])
+
+def apply_choice(pid: str, choice: str):
+    # Placeholder narrative step; swap this later with your LLM scene/choices engine.
+    nxt = f"You choose: **{choice}**. The fog parts slightly, revealing a narrow path..."
+    st.session_state["history"].append({"role": "user", "content": choice})
+    st.session_state["history"].append({"role": "assistant", "content": nxt})
+    st.session_state["scene"] = nxt
+    # Just alternate the choice labels to prove state changes
+    st.session_state["choices"] = ["Keep going", "Turn back"]
+    save_snapshot(pid, st.session_state["scene"], st.session_state["choices"], st.session_state["history"])
 
 def main():
-    st.set_page_config(page_title="Stable Browser ID (localStorage)", page_icon="🪪")
-    st.title("Stable Browser ID (localStorage)")
+    st.title("Gloamreach — Storyworld MVP")
 
-    bid = ensure_browser_id()
+    # 0) Identity (stable across refresh & restart)
+    pid = ensure_browser_id()
 
-    st.subheader("Your browser id")
-    st.code(bid)
+    # 1) Persistence
+    init_db()
+    hydrate_once_for(pid)
 
-    st.write(
-        "This id lives in your browser’s localStorage and will stay the same across "
-        "refreshes and full server restarts as long as you open the app from the same "
-        "origin (e.g., http://localhost:8501) and don’t clear site data."
-    )
+    # 2) Sidebar controls → actions
+    action = sidebar_controls(pid)
+    if action == "start":
+        start_new_story(pid)
+        st.rerun()
+    elif action == "reset":
+        # clear only in-memory (keep DB row)
+        for k in ("scene", "choices", "history"):
+            st.session_state.pop(k, None)
+        st.experimental_set_query_params()  # no-op; keeps URL tidy for Streamlit <=1.34
+        st.rerun()
+    elif action == "switch_user":
+        # clear storage for this user; simulate "new browser"
+        delete_snapshot(pid)
+        clear_browser_id_and_reload()
+        st.stop()
 
-    with st.sidebar:
-        st.header("Controls")
-        if st.button("Clear id"):
-            # Clear in the browser, then reload the page
-            streamlit_js_eval(
-                js_expressions=f"""
-                    (function(){{
-                        window.localStorage.removeItem({LS_KEY!r});
-                        window.location.reload();
-                    }})();
-                """,
-                key="clear_browser_id",
-            )
-        st.caption("DevTools → Application → Local Storage should show one key "
-                   f"`{LS_KEY}` with this same value.")
+    # 3) Main panel
+    if not st.session_state.get("scene"):
+        st.info("Click **Start New Story** in the sidebar to begin.")
+    else:
+        scene_and_choices(st.session_state["scene"], st.session_state.get("choices", []))
+
+    # 4) Choice handler (after UI triggers)
+    picked = st.session_state.pop("_picked", None)
+    if picked:
+        apply_choice(pid, picked)
+        st.rerun()
+
+    # Footnote
+    st.caption("Live-streamed scenes later • Choices advance • SQLite persistence ready • Neon next")
 
 if __name__ == "__main__":
     main()
