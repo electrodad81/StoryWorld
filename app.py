@@ -35,24 +35,88 @@ def load_lore_text() -> str:
 
 LORE_TEXT = load_lore_text()
 
-# ---------- SQLite micro-persistence (tiny, thread-safe) ----------
-import sqlite3, threading, json
-DB_PATH = BASE_DIR / "storyworld.db"
+# ---------- Auto persistence: Neon (Postgres) if DATABASE_URL, else SQLite (thread-safe) ----------
+import sqlite3, threading, json, os
+from pathlib import Path
 
-_conn = None
+DB_PATH = BASE_DIR / "storyworld.db"
 _lock = threading.Lock()
 
-def _sql_connect():
-    global _conn
-    if _conn is None:
-        _conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-    return _conn
+# Postgres (optional)
+try:
+    import psycopg2
+    import psycopg2.extras
+except Exception:
+    psycopg2 = None
 
-def init_sqlite():
+# Detect DATABASE_URL from secrets or env
+def _get_dsn():
+    dsn = None
+    if hasattr(st, "secrets"):
+        try:
+            dsn = st.secrets.get("DATABASE_URL", None)
+        except Exception:
+            dsn = None
+    return dsn or os.environ.get("DATABASE_URL")
+
+_DSN = _get_dsn()
+_pg_conn = None
+_pg_init_error = None
+
+def _pg_connect():
+    """Try once; cache result (or failure)."""
+    global _pg_conn, _pg_init_error
+    if _pg_conn is not None or _pg_init_error is not None:
+        return _pg_conn
+    if not (_DSN and psycopg2):
+        _pg_init_error = True  # mark as “don’t try again”
+        return None
+    try:
+        _pg_conn = psycopg2.connect(
+            _DSN,
+            connect_timeout=10,
+            keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=5,
+        )
+        _pg_conn.autocommit = True
+    except Exception as e:
+        _pg_conn = None
+        _pg_init_error = e
+    return _pg_conn
+
+# SQLite
+_sqlite_conn = None
+def _sql_connect():
+    global _sqlite_conn
+    if _sqlite_conn is None:
+        _sqlite_conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        _sqlite_conn.row_factory = sqlite3.Row
+    return _sqlite_conn
+
+def _backend() -> str:
+    return "postgres" if _pg_connect() is not None else "sqlite"
+
+def init_sqlite():  # name kept for minimal changes; now initializes whichever backend is active
+    if _backend() == "postgres":
+        with _pg_conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS story_progress (
+                    user_id    TEXT PRIMARY KEY,
+                    scene      TEXT,
+                    choices    JSONB,
+                    history    JSONB,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ DEFAULT now()
+                );
+                """
+            )
+            # lightweight updated_at trigger if you want, otherwise skip
+        return
+    # SQLite schema
     con = _sql_connect()
     with _lock:
-        con.execute("""
+        con.execute(
+            """
             CREATE TABLE IF NOT EXISTS story_progress (
                 user_id    TEXT PRIMARY KEY,
                 scene      TEXT,
@@ -60,10 +124,29 @@ def init_sqlite():
                 history    TEXT,    -- JSON text
                 updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             );
-        """)
+            """
+        )
         con.commit()
 
 def load_sqlite_snapshot(pid: str):
+    if _backend() == "postgres":
+        with _pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT scene, choices, history FROM story_progress WHERE user_id=%s;", (pid,))
+            row = cur.fetchone()
+        if not row:
+            return None
+        # normalize JSONB → python list
+        ch = row.get("choices")
+        hi = row.get("history")
+        if isinstance(ch, str):
+            try: ch = json.loads(ch)
+            except Exception: ch = []
+        if isinstance(hi, str):
+            try: hi = json.loads(hi)
+            except Exception: hi = []
+        return {"scene": row.get("scene") or "", "choices": ch or [], "history": hi or []}
+
+    # SQLite
     con = _sql_connect()
     with _lock:
         cur = con.execute(
@@ -84,14 +167,34 @@ def load_sqlite_snapshot(pid: str):
     return {"scene": row["scene"] or "", "choices": choices, "history": history}
 
 def save_sqlite_snapshot(pid: str):
-    con = _sql_connect()
     data = {
         "scene":   st.session_state.get("scene_text") or "",
         "choices": st.session_state.get("choice_list") or [],
         "history": st.session_state.get("history") or [],
     }
+
+    if _backend() == "postgres":
+        with _pg_conn.cursor() as cur:
+            J = psycopg2.extras.Json
+            cur.execute(
+                """
+                INSERT INTO story_progress (user_id, scene, choices, history)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET
+                  scene=EXCLUDED.scene,
+                  choices=EXCLUDED.choices,
+                  history=EXCLUDED.history,
+                  updated_at=now();
+                """,
+                (pid, data["scene"], J(data["choices"]), J(data["history"]))
+            )
+        return
+
+    # SQLite
+    con = _sql_connect()
     with _lock:
-        con.execute("""
+        con.execute(
+            """
             INSERT INTO story_progress (user_id, scene, choices, history, updated_at)
             VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
             ON CONFLICT(user_id) DO UPDATE SET
@@ -99,21 +202,30 @@ def save_sqlite_snapshot(pid: str):
               choices=excluded.choices,
               history=excluded.history,
               updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');
-        """, (pid, data["scene"], json.dumps(data["choices"]), json.dumps(data["history"])))
+            """,
+            (pid, data["scene"], json.dumps(data["choices"]), json.dumps(data["history"]))
+        )
         con.commit()
 
 def delete_sqlite_snapshot(pid: str):
+    if _backend() == "postgres":
+        with _pg_conn.cursor() as cur:
+            cur.execute("DELETE FROM story_progress WHERE user_id=%s;", (pid,))
+        return
     con = _sql_connect()
     with _lock:
         con.execute("DELETE FROM story_progress WHERE user_id=?;", (pid,))
         con.commit()
 
 def has_sqlite_snapshot(pid: str) -> bool:
+    if _backend() == "postgres":
+        with _pg_conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM story_progress WHERE user_id=%s LIMIT 1;", (pid,))
+            return cur.fetchone() is not None
     con = _sql_connect()
     with _lock:
         cur = con.execute("SELECT 1 FROM story_progress WHERE user_id=? LIMIT 1;", (pid,))
         return cur.fetchone() is not None
-
 
 STREAM_MODEL = os.getenv("SCENE_MODEL", "gpt-4o")         # streaming narrative
 SCENE_MODEL  = os.getenv("SCENE_MODEL", "gpt-4o")         # JSON scene (fallback path if ever used)
@@ -509,7 +621,12 @@ def main():
             st.session_state.choice_list = snap["choices"]
             st.session_state.history     = snap["history"]
     # (Optional) show quick debug
-    st.caption(f"SQLite save present: {'yes' if has_sqlite_snapshot(pid) else 'no'}")
+    from urllib.parse import urlparse
+    dsn = _get_dsn()
+    if dsn:
+        u = urlparse(dsn)
+        st.caption(f"DB target: {u.hostname} / {u.path.lstrip('/')}")
+
 
     # Pending choice handler at start of run
     if st.session_state.get("is_generating") and st.session_state.get("pending_choice"):
