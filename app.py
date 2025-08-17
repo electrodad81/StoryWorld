@@ -357,18 +357,21 @@ import time, uuid
 
 COOKIE_KEY = "story_uid"  # canonical; we will also delete any v2 on sight
 
-def establish_player_id(wait_seconds: float = 3.0) -> str:
+def establish_player_id(max_checks: int = 6) -> str:
     """
     Canonical identity = cookie 'story_uid', mirrored to ?pid.
-    Prefers cookie → URL; waits up to `wait_seconds` for cookie bridge; mints only if still none.
-    Sets st.session_state['player_id'] and st.session_state['_pid_source'] = 'cookie'|'url'|'minted'.
+    Prefers cookie → URL. If URL is chosen because cookie isn't ready yet,
+    write the cookie and do a one-time rerun to 'promote' the source to cookie.
+    Sets:
+      st.session_state['player_id']
+      st.session_state['_pid_source'] in {'cookie','url','minted','cookie/url'}
     """
-    import time, uuid
+    import uuid
 
     if st.session_state.get("player_id"):
         return st.session_state["player_id"]
 
-    # Mount cookie controller (if available) and load browser cookies
+    # Mount cookie controller (if available)
     ctrl = None
     if "CookieController" in globals() and CookieController:
         ctrl = st.session_state.get("_cookie_ctrl")
@@ -377,15 +380,9 @@ def establish_player_id(wait_seconds: float = 3.0) -> str:
             ctrl = st.session_state["_cookie_ctrl"]
         _cookie_load(ctrl)
 
-    secure_flag = _bool_secret("COOKIE_SECURE", True)  # false on localhost
+    secure_flag = _bool_secret("COOKIE_SECURE", True)  # False on localhost via secrets.toml
 
-    # Start a wait window so we don't mint too early on first run after restart
-    start = st.session_state.get("_pid_wait_started_at")
-    if start is None:
-        start = time.time()
-        st.session_state["_pid_wait_started_at"] = start
-
-    def choose_now():
+    def choice_now():
         pid_cookie = ctrl.get("story_uid") if ctrl else None
         pid_url    = url_get_pid()
         if pid_cookie:
@@ -394,20 +391,19 @@ def establish_player_id(wait_seconds: float = 3.0) -> str:
             return pid_url, "url"
         return None, None
 
-    chosen, source = choose_now()
+    # Give the bridge a few fast reruns on a cold start
+    attempts = st.session_state.get("_pid_boot_attempts", 0)
+    chosen, source = choice_now()
+    if not chosen and attempts < max_checks:
+        st.session_state["_pid_boot_attempts"] = attempts + 1
+        st.info("Initializing player…")
+        st.rerun()
 
-    # Wait briefly for the cookie bridge to mount if nothing visible yet
-    while not chosen and (time.time() - start) < wait_seconds:
-        time.sleep(0.15)
-        if ctrl:
-            _cookie_load(ctrl)
-        chosen, source = choose_now()
-
-    # Still nothing → mint
+    # Mint only if neither cookie nor URL are present after the quick handshake
     if not chosen:
         chosen, source = uuid.uuid4().hex, "minted"
 
-    # Always write canonical cookie; remove any legacy v2 so it can't conflict
+    # Always write the canonical cookie; remove any legacy v2
     if ctrl:
         _cookie_set(
             ctrl, "story_uid", chosen,
@@ -419,12 +415,23 @@ def establish_player_id(wait_seconds: float = 3.0) -> str:
             try: ctrl.save()
             except Exception: pass
 
-    # Keep URL in sync with the chosen id
+    # Keep URL in sync
     if url_get_pid() != chosen:
         url_set_pid(chosen)
 
+    # --- One-time promotion: if we selected URL because cookie wasn't ready yet,
+    #     rerun once so next run reads from the cookie.
+    if source == "url" and ctrl and not st.session_state.get("_pid_promoted_once"):
+        _cookie_load(ctrl)
+        cookie_now = ctrl.get("story_uid")
+        if cookie_now == chosen:
+            st.session_state["_pid_promoted_once"] = True
+            st.session_state["_pid_source"] = "cookie/url"  # show both during the promotion hop
+            st.rerun()
+
+    # Finalize
     st.session_state["player_id"] = chosen
-    st.session_state["_pid_source"] = source
+    st.session_state["_pid_source"] = "cookie" if source == "cookie" else source
     return chosen
 
 # -------------------------
@@ -726,7 +733,6 @@ def generate_choices_from_scene(
 # -------------------------
 def main():
     st.caption(f"EFFECTIVE COOKIE_SECURE = {_bool_secret('COOKIE_SECURE', True)}")
-    
     pid = establish_player_id()
     st.caption(f"pid:{pid[:8]} • source:{st.session_state.get('_pid_source')}")
 
