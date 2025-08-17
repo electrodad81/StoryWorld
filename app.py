@@ -1,4 +1,4 @@
-# Gloamreach — Streamlit MVP (fixed)
+# Gloamreach — Streamlit MVP (URL-locked player_id, no DB, no cookies)
 from __future__ import annotations
 
 import os
@@ -8,21 +8,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from json import JSONDecodeError
 
-from db import get_db
-
 import streamlit as st
+from openai import OpenAI
+import uuid
+import sys, httpx
+
 APP_TITLE = "Gloamreach — Storyworld MVP"
 st.set_page_config(page_title=APP_TITLE, page_icon="🕯️", layout="centered")
-
-from openai import OpenAI
-
-# import cooky stuff
-import secrets
-try:
-    from streamlit_cookies_controller import CookieController
-except Exception:
-    CookieController = None
-
 
 BASE_DIR = Path(__file__).parent.resolve()
 
@@ -43,6 +35,86 @@ def load_lore_text() -> str:
 
 LORE_TEXT = load_lore_text()
 
+# ---------- SQLite micro-persistence (tiny, thread-safe) ----------
+import sqlite3, threading, json
+DB_PATH = BASE_DIR / "storyworld.db"
+
+_conn = None
+_lock = threading.Lock()
+
+def _sql_connect():
+    global _conn
+    if _conn is None:
+        _conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        _conn.row_factory = sqlite3.Row
+    return _conn
+
+def init_sqlite():
+    con = _sql_connect()
+    with _lock:
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS story_progress (
+                user_id    TEXT PRIMARY KEY,
+                scene      TEXT,
+                choices    TEXT,    -- JSON text
+                history    TEXT,    -- JSON text
+                updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+        """)
+        con.commit()
+
+def load_sqlite_snapshot(pid: str):
+    con = _sql_connect()
+    with _lock:
+        cur = con.execute(
+            "SELECT scene, choices, history FROM story_progress WHERE user_id=?;",
+            (pid,)
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    try:
+        choices = json.loads(row["choices"] or "[]")
+    except Exception:
+        choices = []
+    try:
+        history = json.loads(row["history"] or "[]")
+    except Exception:
+        history = []
+    return {"scene": row["scene"] or "", "choices": choices, "history": history}
+
+def save_sqlite_snapshot(pid: str):
+    con = _sql_connect()
+    data = {
+        "scene":   st.session_state.get("scene_text") or "",
+        "choices": st.session_state.get("choice_list") or [],
+        "history": st.session_state.get("history") or [],
+    }
+    with _lock:
+        con.execute("""
+            INSERT INTO story_progress (user_id, scene, choices, history, updated_at)
+            VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            ON CONFLICT(user_id) DO UPDATE SET
+              scene=excluded.scene,
+              choices=excluded.choices,
+              history=excluded.history,
+              updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now');
+        """, (pid, data["scene"], json.dumps(data["choices"]), json.dumps(data["history"])))
+        con.commit()
+
+def delete_sqlite_snapshot(pid: str):
+    con = _sql_connect()
+    with _lock:
+        con.execute("DELETE FROM story_progress WHERE user_id=?;", (pid,))
+        con.commit()
+
+def has_sqlite_snapshot(pid: str) -> bool:
+    con = _sql_connect()
+    with _lock:
+        cur = con.execute("SELECT 1 FROM story_progress WHERE user_id=? LIMIT 1;", (pid,))
+        return cur.fetchone() is not None
+
+
 STREAM_MODEL = os.getenv("SCENE_MODEL", "gpt-4o")         # streaming narrative
 SCENE_MODEL  = os.getenv("SCENE_MODEL", "gpt-4o")         # JSON scene (fallback path if ever used)
 CHOICE_MODEL = os.getenv("CHOICE_MODEL", "gpt-4o-mini")   # optional fast model; will fallback to SCENE_MODEL
@@ -50,7 +122,7 @@ CHOICE_MODEL = os.getenv("CHOICE_MODEL", "gpt-4o-mini")   # optional fast model;
 CHOICE_COUNT = 2
 CHOICE_TEMPERATURE = 0.9  # a bit higher for variety
 
-# Prompts module stand-ins (replace with your real prompts.py if present)
+# Prompts
 SYSTEM_PROMPT = """You are the narrator of a dark-fantasy world called Gloamreach.
 Keep the language PG-13 and readable for middle schoolers: short sentences, clear word choices.
 Honor the world lore:
@@ -72,7 +144,6 @@ Rules:
 - No meta options like "continue", "go back", or "look around".
 - No ellipses, no code fences, no commentary."""
 
-# A brace-safe continuation template (we will `.replace("{choice}", ...)` at runtime)
 CONTINUE_PROMPT = (
     "Continue the story directly from the player's selection below. "
     "Maintain consistency with prior events and tone. Do NOT include choices in this call.\n\n"
@@ -80,15 +151,47 @@ CONTINUE_PROMPT = (
 )
 
 # -------------------------
+# URL-locked player id (persist across refresh; no cookies, no DB)
+# -------------------------
+def get_or_set_player_id() -> str:
+    """
+    Guarantees a stable player_id across refreshes by pinning it to the URL (?pid=...).
+    - If ?pid is missing, mint one, set it in the URL, and force a single rerun.
+    - On subsequent loads/refreshes, read the same ?pid.
+    """
+    pid: Optional[str] = None
+
+    # Newer Streamlit API first
+    try:
+        q = getattr(st, "query_params", {})
+        pid = q.get("pid")
+        if isinstance(pid, list):
+            pid = pid[0] if pid else None
+    except Exception:
+        q = st.experimental_get_query_params()
+        lst = q.get("pid", [])
+        pid = lst[0] if lst else None
+
+    if not pid:
+        pid = uuid.uuid4().hex
+        # Write ?pid=... to the URL, then rerun once so it sticks
+        try:
+            st.query_params["pid"] = pid
+        except Exception:
+            st.experimental_set_query_params(pid=pid)
+        st.session_state["player_id"] = pid  # usable this very run too
+        st.rerun()
+
+    st.session_state["player_id"] = pid
+    return pid
+
+# -------------------------
 # Utilities
 # -------------------------
-# Load OpenAI API key from environment or secrets
 def _load_openai_key() -> str:
-    # env first
     key = os.getenv("OPENAI_API_KEY")
     if key:
         return key
-    # streamlit secrets
     try:
         key = st.secrets.get("OPENAI_API_KEY", "")
         if key:
@@ -96,15 +199,14 @@ def _load_openai_key() -> str:
             return key
     except Exception:
         pass
-    # toml fallback (CWD then script dir)
     for p in (Path(".streamlit") / "secrets.toml",
-            Path(__file__).parent / ".streamlit" / "secrets.toml"):
+              Path(__file__).parent / ".streamlit" / "secrets.toml"):
         if p.exists():
             try:
                 try:
-                    import tomllib as toml  # py3.11+
+                    import tomllib as toml
                 except Exception:
-                    import tomli as toml     # py3.10-
+                    import tomli as toml
                 data = toml.loads(p.read_text(encoding="utf-8"))
                 key = data.get("OPENAI_API_KEY", "")
                 if key:
@@ -112,9 +214,7 @@ def _load_openai_key() -> str:
                     return key
             except Exception:
                 pass
-
     return ""
-
 
 def get_client() -> OpenAI:
     api_key = _load_openai_key()
@@ -124,23 +224,12 @@ def get_client() -> OpenAI:
 
 # Safely parse JSON from model output
 def parse_json_safely(raw: str):
-    """
-    Accepts raw model text and returns a dict/list by:
-    - stripping code fences
-    - extracting the first {...} JSON object if present
-    - raising with the raw text displayed if it still fails
-    """
     if raw is None:
         raise ValueError("Model returned no content.")
-
     txt = raw.strip()
-
-    # Strip ```json ... ``` or ``` ... ``` fences
     fence_match = re.match(r"^```(?:json)?\s*(.*)```$", txt, flags=re.S)
     if fence_match:
         txt = fence_match.group(1).strip()
-
-    # If text doesn't start with { or [, try to extract first JSON object
     if not txt.lstrip().startswith(("{", "[")):
         obj_match = re.search(r"\{.*\}", txt, flags=re.S)
         arr_match = re.search(r"\[.*\]", txt, flags=re.S)
@@ -148,91 +237,76 @@ def parse_json_safely(raw: str):
             txt = obj_match.group(0)
         elif arr_match:
             txt = arr_match.group(0)
-
     try:
         return json.loads(txt)
     except JSONDecodeError as e:
-        # Let the UI show what came back for quick debugging
-        import streamlit as st
         st.error(f"JSON parsing failed: {e}")
         st.code(raw)
         raise
 
-def show_waiting_choices(container, count: int = 2) -> None:
-    """Reserve the choices area during generation so layout doesn't jump."""
-    with container.container():
-        st.subheader("Your choices")
-        cols = st.columns(count)
-        for i in range(count):
-            with cols[i]:
-                st.button("Generating...", key=f"waiting_{i}", use_container_width=True, disabled=True)
+def _canon(text: str) -> str:
+    t = (text or "").lower()
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
 
-def hydrate_once_not_generating() -> None:
-    """Hydrate from DB once per player (never while generating)."""
-    if st.session_state.get("is_generating", False):
+def _dedupe_choices(choices, block_set, want=2):
+    out, seen = [], set()
+    for c in choices:
+        if not isinstance(c, str):
+            continue
+        k = _canon(c)
+        if not k or k in block_set or k in seen:
+            continue
+        out.append(c.strip())
+        seen.add(k)
+        if len(out) >= want:
+            break
+    return out
+
+def _looks_like_pure_json(text: str) -> bool:
+    t = (text or "").strip()
+    if re.match(r"^```", t) and re.search(r"```$", t):
+        return True
+    if re.match(r"^[\[\{].*[\]\}]$", t, flags=re.DOTALL):
+        return True
+    return False
+
+def sanitize_history(max_turns: int = 10) -> None:
+    hist = st.session_state.get("history", [])
+    if not isinstance(hist, list):
+        st.session_state.history = []
         return
+    cleaned = []
+    for m in hist:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        content = (m.get("content") or "").strip()
+        if role not in ("user", "assistant") or not content:
+            continue
+        lc = content.lower()
+        if _looks_like_pure_json(content):
+            continue
+        if "requested json format" in lc or ("can only provide" in lc and "json" in lc):
+            continue
+        cleaned.append({"role": role, "content": content})
+    st.session_state.history = cleaned[-max_turns:]
 
-    pid = st.session_state.get("player_id", "")
-    if not pid:
+def ensure_state():
+    st.session_state.setdefault("history", [])
+    st.session_state.setdefault("scene_text", "")
+    st.session_state.setdefault("choice_list", [])
+    st.session_state.setdefault("recent_choices", [])
+    st.session_state.setdefault("last_choice", None)
+    st.session_state.setdefault("is_generating", False)
+    st.session_state.setdefault("pending_choice", None)
+
+def trim_history(n_turns: int = 8) -> None:
+    hist = st.session_state.get("history")
+    if not isinstance(hist, list):
+        st.session_state.history = []
         return
-
-    # Only hydrate once per player id
-    if st.session_state.get("hydrated_for_pid") == pid:
-        return
-
-    last_scene, last_choices = load_last_state()
-
-    # Load whatever is available; don't require both at once
-    if last_scene:
-        st.session_state.scene_text = last_scene
-    if isinstance(last_choices, list) and last_choices:
-        st.session_state.choice_list = last_choices
-
-    st.session_state["hydrated_for_pid"] = pid
-
-
-def fix_inconsistent_state() -> None:
-    """
-    Ensure scene_text and choice_list are in sync at startup:
-    - If choices exist but scene is empty, try to hydrate the scene from DB.
-    - If we still can't get a scene, clear the choices so the UI shows the empty state.
-    """
-    cl = st.session_state.get("choice_list", [])
-    sc = st.session_state.get("scene_text", "")
-    if isinstance(cl, list) and cl and not sc:
-        last_scene, last_choices = load_last_state()
-        if last_scene:
-            st.session_state.scene_text = last_scene
-        else:
-            # No corresponding scene in DB → clear stray choices
-            st.session_state.choice_list = []
-
-# -------------------------
-# DB helpers (player-aware) — Neon/SQLite via db.py
-# -------------------------
-def init_db():
-    # Ensure schema is present (Postgres if DATABASE_URL, else SQLite)
-    get_db().ensure_schema()
-
-def save_state(scene: str, choices: list[str]) -> None:
-    user_id = st.session_state.get("player_id") or "_shared_"
-    db = get_db()
-    db.save_progress(user_id, scene, choices, st.session_state.get("history", []))
-
-def load_last_state() -> tuple[Optional[str], Optional[list[str]]]:
-    user_id = st.session_state.get("player_id") or ""
-    db = get_db()
-    tup = db.load_progress(user_id)
-    if not tup:
-        return None, None
-    scene, choices, _history = tup
-    return scene, choices
-
-def player_has_save(user_id: str) -> bool:
-    return get_db().has_progress(user_id)
-
-def delete_player_progress(user_id: str) -> None:
-    get_db().delete_progress(user_id)
+    st.session_state.history = hist[-n_turns:]
 
 # -------------------------
 # LLM calls (stream + choices)
@@ -240,34 +314,27 @@ def delete_player_progress(user_id: str) -> None:
 def stream_scene_text(
     lore: str,
     history: list[dict[str, str]],
-    client,
+    client: OpenAI,
     extra_user: str | None = None,
     target_placeholder=None,
 ) -> str:
     """Stream only the narrative paragraphs. Returns the full text once done."""
     messages: list[dict[str, str]] = []
-
-    # System prompt with lore injected
     sys_msg = {"role": "system", "content": SYSTEM_PROMPT.replace("{lore}", lore)}
     messages.append(sys_msg)
-
-    # Add prior conversation history
     messages.extend(history)
 
-    # Narrative-only nudge — explicitly forbid JSON
     stream_only_prompt = (
         "Return only the narrative paragraph(s) for the next scene. "
         "Use plain prose text—no JSON, no code blocks, no lists, no keys. "
         "Ignore any earlier instructions that ask for JSON. "
         "Keep to a middle-school reading level with short sentences."
     )
-
     if extra_user:
         messages.append({"role": "user", "content": extra_user + "\n\n" + stream_only_prompt})
     else:
         messages.append({"role": "user", "content": stream_only_prompt})
 
-    # Use the MAIN-AREA placeholder if provided; otherwise make a new one
     placeholder = target_placeholder or st.empty()
     loader = st.empty()
     with loader.container():
@@ -279,20 +346,14 @@ def stream_scene_text(
   <div><em>The lantern flickers while the storyteller gathers their thoughts...</em></div>
 </div>
 <style>
-@keyframes pulse {
-    0%   {box-shadow:0 0 2px 1px #f4c542}
-    50%  {box-shadow:0 0 12px 6px #f4c542}
-    100% {box-shadow:0 0 2px 1px #f4c542}
-}
+@keyframes pulse { 0% {box-shadow:0 0 2px 1px #f4c542} 50% {box-shadow:0 0 12px 6px #f4c542} 100% {box-shadow:0 0 2px 1px #f4c542} }
 </style>
 """,
             unsafe_allow_html=True,
         )
 
     full_text = ""
-
     try:
-        # Streaming compat layer
         supports_ctx_stream = hasattr(getattr(client.chat, "completions", object()), "stream")
 
         kwargs = dict(model=STREAM_MODEL, messages=messages, temperature=0.7, max_tokens=450)
@@ -317,11 +378,7 @@ def stream_scene_text(
                 try:
                     choice = chunk.choices[0]
                     delta = getattr(choice, "delta", None)
-                    token = None
-                    if isinstance(delta, dict):
-                        token = delta.get("content")
-                    else:
-                        token = getattr(delta, "content", None)
+                    token = getattr(delta, "content", None) if delta else None
                     if token:
                         full_text += token
                         placeholder.markdown(full_text)
@@ -336,7 +393,6 @@ def stream_scene_text(
                         pass
     finally:
         loader.empty()
-
     return full_text
 
 def generate_choices_from_scene(
@@ -348,10 +404,9 @@ def generate_choices_from_scene(
 ) -> list[str]:
     model = CHOICE_MODEL or SCENE_MODEL
     recent = recent or []
-    avoid_list = recent[-20:]  # last 20 options to avoid
+    avoid_list = recent[-20:]
     if last_chosen:
         avoid_list = avoid_list + [last_chosen]
-
     avoid_bullets = "\n".join(f"- {c}" for c in avoid_list) or "- (none)"
 
     user_msg = (
@@ -360,12 +415,10 @@ def generate_choices_from_scene(
         f"RECENT OPTIONS TO AVOID (do not repeat or rephrase):\n{avoid_bullets}\n"
         f"Return only a JSON array of exactly {count} strings."
     )
-
     messages = [
         {"role": "system", "content": "You answer with a JSON array only—no prose, no code fences."},
         {"role": "user", "content": user_msg},
     ]
-
     resp = client.chat.completions.create(
         model=model,
         messages=messages,
@@ -375,7 +428,6 @@ def generate_choices_from_scene(
     )
     raw = resp.choices[0].message.content
 
-    # Parse or fallback to line-split
     try:
         parsed = parse_json_safely(raw)
         if not isinstance(parsed, list):
@@ -383,11 +435,9 @@ def generate_choices_from_scene(
     except JSONDecodeError:
         parsed = [ln.strip("- •* ").strip() for ln in (raw or "").splitlines() if ln.strip()]
 
-    # Dedupe against recent + last chosen
     block = {_canon(x) for x in avoid_list}
     out = _dedupe_choices(parsed, block_set=block, want=count)
 
-    # If not enough, retry once with stronger language and current block + partial out
     if len(out) < count:
         retry_user = (
             f"{choice_prompt}\n\n"
@@ -403,7 +453,7 @@ def generate_choices_from_scene(
         resp2 = client.chat.completions.create(
             model=model,
             messages=retry_messages,
-            temperature=CHOICE_TEMPERATURE,   # NEW: fix typo (CHOCE_TEMPERATURE -> CHOICE_TEMPERATURE)
+            temperature=CHOICE_TEMPERATURE,
             presence_penalty=0.6,
             max_tokens=160,
         )
@@ -415,7 +465,6 @@ def generate_choices_from_scene(
         except JSONDecodeError:
             pass
 
-    # Final guard: pad with generic but distinct moves if still short
     pads = [
         "Press on into the dark.",
         "Hold position and listen carefully.",
@@ -428,295 +477,44 @@ def generate_choices_from_scene(
         if k not in block and all(_canon(x) != k for x in out):
             out.append(pads[i])
         i += 1
-
     return out[:count]
-
-
-# -------------------------
-# History helpers
-# -------------------------
-def ensure_state():
-    if "history" not in st.session_state:
-        st.session_state.history = []
-    if "scene_text" not in st.session_state:
-        st.session_state.scene_text = ""
-    if "choice_list" not in st.session_state:
-        st.session_state.choice_list = []
-    if "recent_choices" not in st.session_state:
-        st.session_state.recent_choices = []
-    if "last_choice" not in st.session_state:
-        st.session_state.last_choice = None
-    if "is_generating" not in st.session_state:
-        st.session_state.is_generating = False
-    if "hydrated_once" not in st.session_state:
-        st.session_state.hydrated_once = False
-    if "pending_choice" not in st.session_state:
-        st.session_state.pending_choice = None
-
-def trim_history(n_turns: int = 8) -> None:
-    """Keep the last N (assistant+user) messages to limit token use."""
-    hist = st.session_state.get("history")
-    if not isinstance(hist, list):
-        st.session_state.history = []
-        return
-    st.session_state.history = hist[-n_turns:]
-
-#import re  # (you likely already import this)
-
-def _canon(text: str) -> str:
-    """Canonicalize for de-duplication (case/punct/space insensitive)."""
-    t = (text or "").lower()
-    t = re.sub(r"[^a-z0-9]+", " ", t)
-    return re.sub(r"\s+", " ", t).strip()
-
-def _dedupe_choices(choices, block_set, want=2):
-    out, seen = [], set()
-    for c in choices:
-        if not isinstance(c, str):
-            continue
-        k = _canon(c)
-        if not k or k in block_set or k in seen:
-            continue
-        out.append(c.strip())
-        seen.add(k)
-        if len(out) >= want:
-            break
-    return out
-
-
-def _looks_like_pure_json(text: str) -> bool:
-    t = (text or "").strip()
-    # whole-message JSON object/array or code fence
-    if re.match(r"^```", t) and re.search(r"```$", t):
-        return True
-    if re.match(r"^[\[\{].*[\]\}]$", t, flags=re.DOTALL):
-        return True
-    return False
-
-def sanitize_history(max_turns: int = 10) -> None:
-    """
-    Keep only user/assistant lines that look like *story content*:
-    - Drop whole-message JSON / code-fenced blobs
-    - Drop meta-apologies about "requested JSON format"
-    - Trim to last N turns
-    """
-    hist = st.session_state.get("history", [])
-    if not isinstance(hist, list):
-        st.session_state.history = []
-        return
-
-    cleaned = []
-    for m in hist:
-        if not isinstance(m, dict):
-            continue
-        role = m.get("role")
-        content = (m.get("content") or "").strip()
-        if role not in ("user", "assistant"):
-            continue
-        if not content:
-            continue
-        lc = content.lower()
-
-        # Drop JSON/code blocks or prior JSON-format apologies
-        if _looks_like_pure_json(content):
-            continue
-        if "requested json format" in lc or "can only provide" in lc and "json" in lc:
-            continue
-
-        cleaned.append({"role": role, "content": content})
-
-    st.session_state.history = cleaned[-max_turns:]
-
-# =========================
-# DB ADAPTER OVERRIDES
-# Route app helpers to db.py (Neon/SQLite auto-switch)
-# =========================
-from db import get_db as _get_db
-from typing import Optional
-
-def init_db():
-    _get_db().ensure_schema()
-
-def save_state(scene: str, choices: list[str]) -> None:
-    uid = st.session_state.get("player_id") or "_shared_"
-    _get_db().save_progress(uid, scene, choices, st.session_state.get("history", []))
-
-def load_last_state() -> tuple[Optional[str], Optional[list[str]]]:
-    uid = st.session_state.get("player_id") or ""
-    tup = _get_db().load_progress(uid)
-    if not tup:
-        return None, None
-    scene, choices, _history = tup
-    return scene, choices
-
-def player_has_save(user_id: str) -> bool:
-    return _get_db().has_progress(user_id)
-
-def delete_player_progress(user_id: str) -> None:
-    _get_db().delete_progress(user_id)
-
-# -------------------------
-# Resilient hydration override
-# Hydrate if EITHER scene or choices exist; tolerate stringified JSON.
-# -------------------------
-def hydrate_once_not_generating() -> None:
-    """Hydrate from DB once per player (and never while generating)."""
-    if st.session_state.get("is_generating", False):
-        return
-
-    pid = st.session_state.get("player_id", "")
-    if not pid:
-        return
-
-    # Only hydrate once per player id
-    if st.session_state.get("hydrated_for_pid") == pid:
-        return
-
-    last_scene, last_choices = load_last_state()
-
-    # Load whatever is available; don't require both at once
-    if last_scene:
-        st.session_state.scene_text = last_scene
-    if isinstance(last_choices, list) and last_choices:
-        st.session_state.choice_list = last_choices
-
-    st.session_state["hydrated_for_pid"] = pid
 
 # -------------------------
 # Streamlit UI
 # -------------------------
 def main():
+    # Stable, URL-locked player id (no cookies)
+    pid = get_or_set_player_id()
+    st.caption(f"player_id: {pid[:8]}… (URL-locked)")
 
-    # --- Cookie-backed player id (safe, single instantiation) ---
-    uid = None
-    cookie = None
-
-    # 0) Try to read pid from URL first (fallback if cookie not available yet)
-    pid_from_url = ""
-    try:
-        # Newer Streamlit
-        q = getattr(st, "query_params", {})
-        pid_from_url = q.get("pid", "")
-        if isinstance(pid_from_url, list):
-            pid_from_url = pid_from_url[0] if pid_from_url else ""
-    except Exception:
-        # Older Streamlit API
-        q = st.experimental_get_query_params()
-        pid_from_url = (q.get("pid", [""]) or [""])[0]
-
-    # 1) Cookie controller (if installed)
-    if CookieController:
-        try:
-            cookie = st.session_state.get("_cookie_ctrl")
-            if cookie is None:
-                st.session_state["_cookie_ctrl"] = CookieController(key="browser_cookie")
-                cookie = st.session_state["_cookie_ctrl"]
-
-            # Read/create browser-scoped id
-            uid = cookie.get("story_uid")
-
-            if not uid:
-                # Prefer URL pid if present
-                uid = pid_from_url or secrets.token_hex(16)
-
-                # IMPORTANT: localhost-friendly cookie (works on http)
-                cookie.set(
-                    "story_uid",
-                    uid,
-                    max_age=365 * 24 * 60 * 60,  # 1 year
-                    path="/",
-                    samesite="Lax",
-                    secure=False,                # allow on http://localhost
-                )
-
-                # Also pin into URL so a refresh still finds it even if cookie lags
-                try:
-                    # Newer Streamlit
-                    st.query_params["pid"] = uid
-                except Exception:
-                    st.experimental_set_query_params(pid=uid)
-
-        except Exception:
-            # Component hiccup → fall back to URL → else random (session-only)
-            uid = pid_from_url or st.session_state.get("player_id") or secrets.token_hex(16)
-    else:
-        # No component available → use URL first, else session-only id
-        uid = pid_from_url or st.session_state.get("player_id") or secrets.token_hex(16)
-
-    # 2) Write the chosen id into session (used everywhere else)
-    st.session_state["player_id"] = uid
-
-    st.caption(f"player_id: {st.session_state['player_id']}")
-
-    # Streamlit app configuration
     st.title(APP_TITLE)
 
-    # Fresh placeholders per run (safe across reruns)
-    story_ph = st.empty()        # keep as is
-    choices_ph = st.container()  # <- use a container (not st.empty())
-
-    # ADD THIS:
-    grid_slot = choices_ph.empty()  # a placeholder INSIDE the container
+    # Fresh placeholders per run
+    story_ph = st.empty()
+    choices_ph = st.container()
+    grid_slot = choices_ph.empty()
 
     st.caption("Live-streamed scenes • Click choices to advance")
-    init_db()
 
-    client = get_client()   # <-- add this line
-
-    # --- Diagnostics (after init_db()) ---
-    pid = st.session_state.get("player_id", "")
-    try:
-        backend = get_db().backend
-    except Exception as e:
-        backend = f"error:{type(e).__name__}"
-    st.caption(f"Player: {pid[:8]}… • DB: {backend}")
-
-    with st.sidebar:
-        st.divider()
-        st.subheader("Persistence debug")
-
-        if st.button("Self-test: write & read"):
-            # write
-            test_scene = "SELFTEST_SCENE_♞"
-            test_choices = ["SELF_A", "SELF_B"]
-            save_state(test_scene, test_choices)
-
-            # read
-            s, c = load_last_state()
-            st.write({
-                "backend": backend,
-                "wrote_scene": test_scene,
-                "read_scene": s,
-                "choices_ok": (c == test_choices)
-            })
-
-        if st.button("Dump DB row"):
-            row = get_db().load_progress(pid)
-            st.code(json.dumps({"pid": pid, "backend": backend, "row": row}, indent=2), language="json")
-
-
+    client = get_client()
     ensure_state()
-
-    # Hydrate once, then fix any stray “choices without scene”
-    hydrate_once_not_generating()
-    fix_inconsistent_state()
-
-    # --- Force-hydrate if a save exists but UI is empty ---
-    if not st.session_state.get("scene_text") and not st.session_state.get("choice_list"):
-        if player_has_save(st.session_state.get("player_id", "")):
-            s, c = load_last_state()
-            if s:
-                st.session_state.scene_text = s
-            if isinstance(c, list) and c:
-                st.session_state.choice_list = c
-
     sanitize_history(10)
 
-    # --- Process a pending choice at the very start of the run ---
+    # Initialize DB and hydrate once per fresh session
+    init_sqlite()
+    if not st.session_state.get("scene_text") and not st.session_state.get("choice_list"):
+        snap = load_sqlite_snapshot(pid)
+        if snap:
+            st.session_state.scene_text  = snap["scene"]
+            st.session_state.choice_list = snap["choices"]
+            st.session_state.history     = snap["history"]
+    # (Optional) show quick debug
+    st.caption(f"SQLite save present: {'yes' if has_sqlite_snapshot(pid) else 'no'}")
+
+    # Pending choice handler at start of run
     if st.session_state.get("is_generating") and st.session_state.get("pending_choice"):
         selected = st.session_state.pending_choice
 
-        # Keep the grid visible during streaming
         with grid_slot.container():
             st.subheader("Your choices")
             cols = st.columns(CHOICE_COUNT)
@@ -724,12 +522,10 @@ def main():
                 with cols[i]:
                     st.button("Generating...", key=f"waiting_{i}", use_container_width=True, disabled=True)
 
-        # Advance the story
         cont = CONTINUE_PROMPT.replace("{choice}", selected)
         st.session_state.history.append({"role": "user", "content": cont})
         sanitize_history(10)
 
-        # Stream new scene
         narrative = stream_scene_text(
             LORE_TEXT,
             st.session_state.history,
@@ -740,7 +536,6 @@ def main():
         st.session_state.scene_text = narrative
         st.session_state.history.append({"role": "assistant", "content": narrative})
 
-        # Next choices
         new_choices = generate_choices_from_scene(
             narrative,
             client,
@@ -750,30 +545,25 @@ def main():
         )
         st.session_state.choice_list = new_choices
         st.session_state.recent_choices = (st.session_state.recent_choices + new_choices)[-30:]
-
-
-
-        save_state(narrative, new_choices)
         trim_history(10)
 
-        # Clear flags — do NOT rerun here
+        save_sqlite_snapshot(pid)
+
         st.session_state.pending_choice = None
         st.session_state.is_generating = False
-
 
     # Sidebar controls
     with st.sidebar:
         st.subheader("Controls")
+
         if st.button("Start New Story", use_container_width=True):
-            # Clear old state and HIDE/disable buttons during generation
             st.session_state.history = []
             st.session_state.scene_text = ""
-            st.session_state.choice_list = []          # hide old buttons immediately
-            st.session_state.recent_choices = []       # reset anti-repeat tracker
+            st.session_state.choice_list = []
+            st.session_state.recent_choices = []
             st.session_state.last_choice = None
-            st.session_state.is_generating = True      # disable buttons while generating
+            st.session_state.is_generating = True
 
-            # Keep the grid visible while the opening scene streams
             with grid_slot.container():
                 st.subheader("Your choices")
                 cols = st.columns(CHOICE_COUNT)
@@ -781,8 +571,6 @@ def main():
                     with cols[i]:
                         st.button("Generating...", key=f"waiting_{i}", use_container_width=True, disabled=True)
 
-
-            # Stream the opening scene into the main placeholder
             sanitize_history(10)
             narrative = stream_scene_text(
                 LORE_TEXT,
@@ -791,12 +579,9 @@ def main():
                 extra_user=scene_prompt,
                 target_placeholder=story_ph,
             )
-
-            # Commit the streamed scene to state/history
             st.session_state.scene_text = narrative
             st.session_state.history.append({"role": "assistant", "content": narrative})
 
-            # Generate exactly two new choices, avoiding repeats
             choices = generate_choices_from_scene(
                 narrative,
                 client,
@@ -805,53 +590,46 @@ def main():
                 count=CHOICE_COUNT,
             )
             st.session_state.choice_list = choices
-
-            # ✅ The three lines you asked about — keep them in this order:
             st.session_state.recent_choices = (st.session_state.recent_choices + choices)[-30:]
-            save_state(narrative, choices)
-            st.session_state.is_generating = False      # re-enable buttons
+            st.session_state.is_generating = False
+
+            save_sqlite_snapshot(pid)
 
         if st.button("Reset Session", use_container_width=True):
-            pid = st.session_state.get("player_id", "")
-
-            # Remove the persisted save so we don't auto-load old progress
-            try:
-                delete_player_progress(pid)
-            except Exception:
-                pass
-
-            # Clear volatile state but keep the player id
+            # Clear volatile state but keep the player id from URL
+            keep_pid = st.session_state.get("player_id", "")
             st.session_state.clear()
-            st.session_state["player_id"] = pid
-
-            # Allow hydrate next run (we just deleted the row)
-            st.session_state["hydrated_for_pid"] = None
-            st.session_state["is_generating"] = False
-            st.session_state["pending_choice"] = None
-
+            st.session_state["player_id"] = keep_pid
+            delete_sqlite_snapshot(keep_pid)
             st.rerun()
-        
-        st.divider()
-        pid = st.session_state.get("player_id", "")
-        st.caption(
-            f"Player: `{pid[:8]}…` • has save: {'yes' if player_has_save(pid) else 'no'}"
-        )
 
+        # Optional: switch to a fresh user id (clears ?pid)
+        if st.button("Switch user (new id)", use_container_width=True):
+            try:
+                if hasattr(st, "query_params"):
+                    if "pid" in st.query_params:
+                        del st.query_params["pid"]
+                else:
+                    st.experimental_set_query_params()
+            except Exception:
+                st.experimental_set_query_params()
+            for k in ("player_id", "hydrated_for_pid", "_cookie_set_once"):
+                st.session_state.pop(k, None)
+            st.rerun()
 
-        # --- Scene render ---
-        if st.session_state.scene_text:
-            story_ph.markdown(st.session_state.scene_text)
-        else:
-            story_ph.info("Click **Start New Story** in the sidebar to begin.")
+    # --- Scene render (main area) ---
+    if st.session_state.scene_text:
+        story_ph.markdown(st.session_state.scene_text)
+    else:
+        story_ph.info("Click **Start New Story** in the sidebar to begin.")
 
-
-    # --- Always-on choices grid (keeps the left column stable every run) ---
+    # --- Always-on choices grid ---
     choices_val = st.session_state.choice_list if isinstance(st.session_state.choice_list, list) else []
     has_scene = bool(st.session_state.scene_text)
     has_choices = bool(choices_val)
     generating = bool(st.session_state.get("is_generating", False) or st.session_state.get("pending_choice"))
 
-    with grid_slot.container():     # <— use the slot, not choices_ph directly
+    with grid_slot.container():
         st.subheader("Your choices")
         n = CHOICE_COUNT
         cols = st.columns(n)
@@ -871,10 +649,9 @@ def main():
             for i in range(n):
                 with cols[i]:
                     st.button(label, key=f"waiting_{i}", use_container_width=True, disabled=True)
-                    
-    import sys, openai, httpx
+
     st.caption(
-        f"Runtime: {sys.executable} • openai {openai.__version__} • httpx {httpx.__version__}"
+        f"Runtime: {sys.executable} • openai {OpenAI.__module__.split('.')[0]} • httpx {httpx.__version__}"
     )
 
 if __name__ == "__main__":
