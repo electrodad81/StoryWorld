@@ -12,17 +12,59 @@ import streamlit as st
 from openai import OpenAI
 import uuid
 import sys, httpx
+import secrets
 
 APP_TITLE = "Gloamreach — Storyworld MVP"
 st.set_page_config(page_title=APP_TITLE, page_icon="🕯️", layout="centered")
 
 BASE_DIR = Path(__file__).parent.resolve()
 
+import inspect
+
+def _cookie_load(ctrl):
+    if hasattr(ctrl, "load"):
+        try:
+            ctrl.load()
+        except Exception:
+            pass
+
+def _cookie_set(ctrl, name, value, *, max_age=None, path="/", secure=None, same_site="Lax"):
+    """Call ctrl.set(...) with only the kwargs this version supports."""
+    try:
+        sig = inspect.signature(ctrl.set)
+        kwargs = {}
+        if "max_age" in sig.parameters and max_age is not None:
+            kwargs["max_age"] = max_age
+        if "path" in sig.parameters:
+            kwargs["path"] = path
+        # handle naming differences across versions
+        for k in ("samesite", "same_site", "sameSite"):
+            if k in sig.parameters and same_site is not None:
+                kwargs[k] = same_site
+                break
+        if "secure" in sig.parameters and secure is not None:
+            kwargs["secure"] = secure
+        return ctrl.set(name, value, **kwargs)
+    except TypeError:
+        # ultra-minimal signature
+        return ctrl.set(name, value)
+
+def _cookie_remove(ctrl, name, path="/"):
+    """Call ctrl.remove(...) with compatible kwargs."""
+    try:
+        sig = inspect.signature(ctrl.remove)
+        kwargs = {}
+        if "path" in sig.parameters:
+            kwargs["path"] = path
+        return ctrl.remove(name, **kwargs)
+    except TypeError:
+        return ctrl.remove(name)
+
+
 # -------------------------
 # Constants / Paths
 # -------------------------
 LORE_PATH = BASE_DIR / "lore.json"
-
 # -- Lore loader (cached once) --
 @st.cache_data(show_spinner=False)
 def load_lore_text() -> str:
@@ -227,6 +269,7 @@ def has_sqlite_snapshot(pid: str) -> bool:
         cur = con.execute("SELECT 1 FROM story_progress WHERE user_id=? LIMIT 1;", (pid,))
         return cur.fetchone() is not None
 
+
 STREAM_MODEL = os.getenv("SCENE_MODEL", "gpt-4o")         # streaming narrative
 SCENE_MODEL  = os.getenv("SCENE_MODEL", "gpt-4o")         # JSON scene (fallback path if ever used)
 CHOICE_MODEL = os.getenv("CHOICE_MODEL", "gpt-4o-mini")   # optional fast model; will fallback to SCENE_MODEL
@@ -265,37 +308,97 @@ CONTINUE_PROMPT = (
 # -------------------------
 # URL-locked player id (persist across refresh; no cookies, no DB)
 # -------------------------
-def get_or_set_player_id() -> str:
-    """
-    Guarantees a stable player_id across refreshes by pinning it to the URL (?pid=...).
-    - If ?pid is missing, mint one, set it in the URL, and force a single rerun.
-    - On subsequent loads/refreshes, read the same ?pid.
-    """
-    pid: Optional[str] = None
 
-    # Newer Streamlit API first
+# optional: let local dev disable secure cookies
+def _bool_secret(name: str, default: bool) -> bool:
+    try:
+        return str(st.secrets.get(name, default)).lower() in ("1","true","yes","on")
+    except Exception:
+        return default
+
+try:
+    from streamlit_cookies_controller import CookieController
+except Exception:
+    CookieController = None
+
+def _read_pid_from_url() -> str | None:
     try:
         q = getattr(st, "query_params", {})
-        pid = q.get("pid")
-        if isinstance(pid, list):
-            pid = pid[0] if pid else None
+        val = q.get("pid")
+        if isinstance(val, list):
+            return val[0] if val else None
+        return val
     except Exception:
         q = st.experimental_get_query_params()
         lst = q.get("pid", [])
-        pid = lst[0] if lst else None
+        return lst[0] if lst else None
 
-    if not pid:
-        pid = uuid.uuid4().hex
-        # Write ?pid=... to the URL, then rerun once so it sticks
-        try:
-            st.query_params["pid"] = pid
-        except Exception:
-            st.experimental_set_query_params(pid=pid)
-        st.session_state["player_id"] = pid  # usable this very run too
-        st.rerun()
+def _write_pid_to_url(pid: str) -> None:
+    try:
+        st.query_params["pid"] = pid
+    except Exception:
+        st.experimental_set_query_params(pid=pid)
 
+def get_or_set_player_id() -> str:
+    """
+    Stable across refreshes AND app restarts:
+      - Prefer cookie (long-lived).
+      - If cookie & URL differ, adopt cookie and overwrite URL.
+      - If only URL exists, adopt into cookie.
+      - Else mint → set both → one-time rerun.
+    """
+    if st.session_state.get("player_id"):
+        return st.session_state["player_id"]
+
+    # init cookie controller
+    ctrl = None
+    if CookieController:
+        ctrl = st.session_state.get("_cookie_ctrl")
+        if ctrl is None:
+            st.session_state["_cookie_ctrl"] = CookieController(key="browser_cookie")
+            ctrl = st.session_state["_cookie_ctrl"]
+        _cookie_load(ctrl)  # ensure latest browser cookies are visible
+
+    pid_cookie = ctrl.get("story_uid") if ctrl else None
+    pid_url = _read_pid_from_url()
+
+    secure = _bool_secret("COOKIE_SECURE", True)  # set to false locally for http://
+
+    # CASE 1: both exist but DIFFER -> adopt cookie, overwrite URL
+    if pid_cookie and pid_url and pid_cookie != pid_url:
+        _write_pid_to_url(pid_cookie)
+        st.session_state["player_id"] = pid_cookie
+        return pid_cookie
+
+    # CASE 2: cookie exists (URL may or may not) -> prefer cookie, ensure URL
+    if pid_cookie:
+        if not pid_url:
+            _write_pid_to_url(pid_cookie)
+        st.session_state["player_id"] = pid_cookie
+        return pid_cookie
+
+    # CASE 3: URL exists but cookie missing -> adopt URL into cookie
+    if pid_url:
+        if ctrl:
+            _cookie_set(ctrl, "story_uid", pid_url, max_age=365*24*60*60, path="/", secure=secure, same_site="Lax")
+            if hasattr(ctrl, "save"):
+                try: ctrl.save()
+                except Exception: pass
+        st.session_state["player_id"] = pid_url
+        return pid_url
+
+    # CASE 4: neither exists -> mint → set both → one-time rerun
+    pid = uuid.uuid4().hex
+    if ctrl:
+        _cookie_set(ctrl, "story_uid", pid, max_age=365*24*60*60, path="/", secure=secure, same_site="Lax")
+        if hasattr(ctrl, "save"):
+            try: ctrl.save()
+            except Exception: pass
+    _write_pid_to_url(pid)
     st.session_state["player_id"] = pid
-    return pid
+    st.rerun()
+    return pid  # not reached
+
 
 # -------------------------
 # Utilities
@@ -597,7 +700,20 @@ def generate_choices_from_scene(
 def main():
     # Stable, URL-locked player id (no cookies)
     pid = get_or_set_player_id()
-    st.caption(f"player_id: {pid[:8]}… (URL-locked)")
+
+    # Debug: show both sources so we can confirm they match
+    cookie_id = None
+    ctrl = st.session_state.get("_cookie_ctrl")
+    if ctrl:
+        try:
+            _cookie_load(ctrl)
+            cookie_id = ctrl.get("story_uid")
+        except Exception:
+            cookie_id = "(error)"
+    url_id = _read_pid_from_url()
+    st.caption(f"player_id: {pid[:8]}… • cookie: {str(cookie_id)[:8] if cookie_id else 'None'} • url: {str(url_id)[:8] if url_id else 'None'}")
+
+    st.caption(f"player_id: {pid[:8]}… (sticky via cookie + URL)")
 
     st.title(APP_TITLE)
 
