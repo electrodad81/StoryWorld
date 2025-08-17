@@ -6,7 +6,7 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Optional, Tuple, List, Any, Dict
+from typing import Optional, Tuple, List
 
 # Streamlit is optional (tests / non-Streamlit contexts)
 try:
@@ -28,8 +28,8 @@ SQLITE_PATH = BASE_DIR / "storyworld.db"
 class DB:
     """
     Minimal DB helper:
-      - Postgres (Neon) if DATABASE_URL provided (prefer st.secrets, else env)
-      - SQLite fallback for local dev
+      - Postgres (Neon) if DATABASE_URL connects
+      - SQLite fallback for local dev or if Postgres connect fails
     """
     def __init__(self):
         # Prefer Streamlit secrets, then environment
@@ -45,28 +45,32 @@ class DB:
         self.backend = "sqlite"
         self._pg_conn = None
         self._sq_conn = None
-        self._lock = None  # used for SQLite thread-safety
+        self._lock: Optional[threading.Lock] = None
+        self.init_error: Optional[Exception] = None
 
+        # Try Postgres first if possible, but fall back cleanly
         if dsn and psycopg2 is not None:
-            # Postgres (Neon)
-            self.backend = "postgres"
-            # Keep-alives help with serverless pools
-            self._pg_conn = psycopg2.connect(
-                dsn,
-                connect_timeout=10,
-                keepalives=1,
-                keepalives_idle=30,
-                keepalives_interval=10,
-                keepalives_count=5,
-            )
-            self._pg_conn.autocommit = True
-            self._pg_cur_factory = psycopg2.extras.RealDictCursor
-        else:
-            # SQLite fallback (thread-safe)
-            self._sq_conn = sqlite3.connect(
-                str(SQLITE_PATH),
-                check_same_thread=False,  # allow access across Streamlit threads
-            )
+            try:
+                self._pg_conn = psycopg2.connect(
+                    dsn,
+                    connect_timeout=10,
+                    keepalives=1,
+                    keepalives_idle=30,
+                    keepalives_interval=10,
+                    keepalives_count=5,
+                )
+                self._pg_conn.autocommit = True
+                self._pg_cur_factory = psycopg2.extras.RealDictCursor
+                self.backend = "postgres"
+            except Exception as e:
+                # Could not connect to Postgres — use SQLite instead
+                self._pg_conn = None
+                self.backend = "sqlite"
+                self.init_error = e
+
+        if self.backend == "sqlite":
+            # Thread-safe SQLite for Streamlit
+            self._sq_conn = sqlite3.connect(str(SQLITE_PATH), check_same_thread=False)
             self._sq_conn.row_factory = sqlite3.Row
             self._lock = threading.Lock()
 
@@ -118,6 +122,7 @@ class DB:
                     """
                 )
         else:
+            assert self._lock is not None
             with self._lock:
                 self._sq_conn.execute(
                     """
@@ -150,12 +155,30 @@ class DB:
                 row = cur.fetchone()
                 if not row:
                     return None
-                return (
-                    row.get("scene"),
-                    row.get("choices") or [],
-                    row.get("history") or [],
-                )
+
+                scene = row.get("scene")
+
+                ch_raw = row.get("choices")
+                if isinstance(ch_raw, str):
+                    try:
+                        choices = json.loads(ch_raw)
+                    except Exception:
+                        choices = []
+                else:
+                    choices = ch_raw or []
+
+                hi_raw = row.get("history")
+                if isinstance(hi_raw, str):
+                    try:
+                        history = json.loads(hi_raw)
+                    except Exception:
+                        history = []
+                else:
+                    history = hi_raw or []
+
+                return (scene, choices, history)
         else:
+            assert self._lock is not None
             with self._lock:
                 cur = self._sq_conn.execute(
                     "SELECT scene, choices, history FROM story_progress WHERE user_id = ?;",
@@ -184,8 +207,7 @@ class DB:
 
         if self.backend == "postgres":
             with self._pg_conn.cursor() as cur:
-                # Use psycopg2.extras.Json to ensure proper JSONB binding
-                J = psycopg2.extras.Json
+                J = psycopg2.extras.Json  # ensures proper JSONB binding
                 cur.execute(
                     """
                     INSERT INTO story_progress (user_id, scene, choices, history)
@@ -198,6 +220,7 @@ class DB:
                     (user_id, scene, J(choices), J(history)),
                 )
         else:
+            assert self._lock is not None
             payload_choices = json.dumps(choices)
             payload_history = json.dumps(history)
             with self._lock:
@@ -227,6 +250,7 @@ class DB:
                 )
                 return cur.fetchone() is not None
         else:
+            assert self._lock is not None
             with self._lock:
                 cur = self._sq_conn.execute(
                     "SELECT 1 FROM story_progress WHERE user_id = ? LIMIT 1;",
@@ -242,6 +266,7 @@ class DB:
             with self._pg_conn.cursor() as cur:
                 cur.execute("DELETE FROM story_progress WHERE user_id = %s;", (user_id,))
         else:
+            assert self._lock is not None
             with self._lock:
                 self._sq_conn.execute(
                     "DELETE FROM story_progress WHERE user_id = ?;",

@@ -31,6 +31,18 @@ BASE_DIR = Path(__file__).parent.resolve()
 # -------------------------
 LORE_PATH = BASE_DIR / "lore.json"
 
+# -- Lore loader (cached once) --
+@st.cache_data(show_spinner=False)
+def load_lore_text() -> str:
+    p = LORE_PATH
+    try:
+        return p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        st.warning("lore.json not found — running with minimal lore.")
+        return ""
+
+LORE_TEXT = load_lore_text()
+
 STREAM_MODEL = os.getenv("SCENE_MODEL", "gpt-4o")         # streaming narrative
 SCENE_MODEL  = os.getenv("SCENE_MODEL", "gpt-4o")         # JSON scene (fallback path if ever used)
 CHOICE_MODEL = os.getenv("CHOICE_MODEL", "gpt-4o-mini")   # optional fast model; will fallback to SCENE_MODEL
@@ -156,17 +168,28 @@ def show_waiting_choices(container, count: int = 2) -> None:
                 st.button("Generating...", key=f"waiting_{i}", use_container_width=True, disabled=True)
 
 def hydrate_once_not_generating() -> None:
-    """On a fresh run, hydrate scene + choices together from SQLite (only once, never while generating)."""
-    if st.session_state.get("hydrated_once", False):
-        return
+    """Hydrate from DB once per player (never while generating)."""
     if st.session_state.get("is_generating", False):
         return
-    if not st.session_state.scene_text and not st.session_state.choice_list:
-        last_scene, last_choices = load_last_state()
-        if last_scene and last_choices:
-            st.session_state.scene_text = last_scene
-            st.session_state.choice_list = last_choices
-    st.session_state.hydrated_once = True
+
+    pid = st.session_state.get("player_id", "")
+    if not pid:
+        return
+
+    # Only hydrate once per player id
+    if st.session_state.get("hydrated_for_pid") == pid:
+        return
+
+    last_scene, last_choices = load_last_state()
+
+    # Load whatever is available; don't require both at once
+    if last_scene:
+        st.session_state.scene_text = last_scene
+    if isinstance(last_choices, list) and last_choices:
+        st.session_state.choice_list = last_choices
+
+    st.session_state["hydrated_for_pid"] = pid
+
 
 def fix_inconsistent_state() -> None:
     """
@@ -504,6 +527,60 @@ def sanitize_history(max_turns: int = 10) -> None:
 
     st.session_state.history = cleaned[-max_turns:]
 
+# =========================
+# DB ADAPTER OVERRIDES
+# Route app helpers to db.py (Neon/SQLite auto-switch)
+# =========================
+from db import get_db as _get_db
+from typing import Optional
+
+def init_db():
+    _get_db().ensure_schema()
+
+def save_state(scene: str, choices: list[str]) -> None:
+    uid = st.session_state.get("player_id") or "_shared_"
+    _get_db().save_progress(uid, scene, choices, st.session_state.get("history", []))
+
+def load_last_state() -> tuple[Optional[str], Optional[list[str]]]:
+    uid = st.session_state.get("player_id") or ""
+    tup = _get_db().load_progress(uid)
+    if not tup:
+        return None, None
+    scene, choices, _history = tup
+    return scene, choices
+
+def player_has_save(user_id: str) -> bool:
+    return _get_db().has_progress(user_id)
+
+def delete_player_progress(user_id: str) -> None:
+    _get_db().delete_progress(user_id)
+
+# -------------------------
+# Resilient hydration override
+# Hydrate if EITHER scene or choices exist; tolerate stringified JSON.
+# -------------------------
+def hydrate_once_not_generating() -> None:
+    """Hydrate from DB once per player (and never while generating)."""
+    if st.session_state.get("is_generating", False):
+        return
+
+    pid = st.session_state.get("player_id", "")
+    if not pid:
+        return
+
+    # Only hydrate once per player id
+    if st.session_state.get("hydrated_for_pid") == pid:
+        return
+
+    last_scene, last_choices = load_last_state()
+
+    # Load whatever is available; don't require both at once
+    if last_scene:
+        st.session_state.scene_text = last_scene
+    if isinstance(last_choices, list) and last_choices:
+        st.session_state.choice_list = last_choices
+
+    st.session_state["hydrated_for_pid"] = pid
 
 # -------------------------
 # Streamlit UI
@@ -514,29 +591,62 @@ def main():
     uid = None
     cookie = None
 
+    # 0) Try to read pid from URL first (fallback if cookie not available yet)
+    pid_from_url = ""
+    try:
+        # Newer Streamlit
+        q = getattr(st, "query_params", {})
+        pid_from_url = q.get("pid", "")
+        if isinstance(pid_from_url, list):
+            pid_from_url = pid_from_url[0] if pid_from_url else ""
+    except Exception:
+        # Older Streamlit API
+        q = st.experimental_get_query_params()
+        pid_from_url = (q.get("pid", [""]) or [""])[0]
+
+    # 1) Cookie controller (if installed)
     if CookieController:
         try:
-            # Reuse one controller instance across reruns
             cookie = st.session_state.get("_cookie_ctrl")
             if cookie is None:
                 st.session_state["_cookie_ctrl"] = CookieController(key="browser_cookie")
                 cookie = st.session_state["_cookie_ctrl"]
 
-            # Read/create the browser-scoped id
+            # Read/create browser-scoped id
             uid = cookie.get("story_uid")
-            if not uid:
-                uid = secrets.token_hex(16)  # 128-bit opaque id
-                cookie.set("story_uid", uid, max_age=365*24*60*60, path="/")  # 1 year
-        except Exception:
-            # Component hiccup: per-session fallback
-            uid = st.session_state.get("player_id") or secrets.token_hex(16)
-    else:
-        # Component not installed: per-session fallback
-        uid = st.session_state.get("player_id") or secrets.token_hex(16)
 
-    # Set default player_id from cookie on first run
-    if not st.session_state.get("player_id"):
-        st.session_state["player_id"] = uid
+            if not uid:
+                # Prefer URL pid if present
+                uid = pid_from_url or secrets.token_hex(16)
+
+                # IMPORTANT: localhost-friendly cookie (works on http)
+                cookie.set(
+                    "story_uid",
+                    uid,
+                    max_age=365 * 24 * 60 * 60,  # 1 year
+                    path="/",
+                    samesite="Lax",
+                    secure=False,                # allow on http://localhost
+                )
+
+                # Also pin into URL so a refresh still finds it even if cookie lags
+                try:
+                    # Newer Streamlit
+                    st.query_params["pid"] = uid
+                except Exception:
+                    st.experimental_set_query_params(pid=uid)
+
+        except Exception:
+            # Component hiccup → fall back to URL → else random (session-only)
+            uid = pid_from_url or st.session_state.get("player_id") or secrets.token_hex(16)
+    else:
+        # No component available → use URL first, else session-only id
+        uid = pid_from_url or st.session_state.get("player_id") or secrets.token_hex(16)
+
+    # 2) Write the chosen id into session (used everywhere else)
+    st.session_state["player_id"] = uid
+
+    st.caption(f"player_id: {st.session_state['player_id']}")
 
     # Streamlit app configuration
     st.title(APP_TITLE)
@@ -551,33 +661,54 @@ def main():
     st.caption("Live-streamed scenes • Click choices to advance")
     init_db()
 
-    # Debug caption: confirm cookie + DB backend + whether a save exists
+    client = get_client()   # <-- add this line
+
+    # --- Diagnostics (after init_db()) ---
     pid = st.session_state.get("player_id", "")
     try:
         backend = get_db().backend
     except Exception as e:
         backend = f"error:{type(e).__name__}"
+    st.caption(f"Player: {pid[:8]}… • DB: {backend}")
 
-    st.caption(f"Player: {pid[:8]}… • has save: {'yes' if player_has_save(pid) else 'no'} • DB: {backend}")
+    with st.sidebar:
+        st.divider()
+        st.subheader("Persistence debug")
 
-    # Load lore
-    if not LORE_PATH.exists():
-        st.error("lore.json not found. Please place it next to app_fixed.py.")
-        st.stop()
-    lore = LORE_PATH.read_text(encoding="utf-8")
+        if st.button("Self-test: write & read"):
+            # write
+            test_scene = "SELFTEST_SCENE_♞"
+            test_choices = ["SELF_A", "SELF_B"]
+            save_state(test_scene, test_choices)
 
-    # Client
-    try:
-        client = get_client()
-    except Exception as e:
-        st.exception(e)   # was st.error(...). This prints the full stack to the page.
-        st.stop()
+            # read
+            s, c = load_last_state()
+            st.write({
+                "backend": backend,
+                "wrote_scene": test_scene,
+                "read_scene": s,
+                "choices_ok": (c == test_choices)
+            })
+
+        if st.button("Dump DB row"):
+            row = get_db().load_progress(pid)
+            st.code(json.dumps({"pid": pid, "backend": backend, "row": row}, indent=2), language="json")
+
 
     ensure_state()
 
     # Hydrate once, then fix any stray “choices without scene”
     hydrate_once_not_generating()
     fix_inconsistent_state()
+
+    # --- Force-hydrate if a save exists but UI is empty ---
+    if not st.session_state.get("scene_text") and not st.session_state.get("choice_list"):
+        if player_has_save(st.session_state.get("player_id", "")):
+            s, c = load_last_state()
+            if s:
+                st.session_state.scene_text = s
+            if isinstance(c, list) and c:
+                st.session_state.choice_list = c
 
     sanitize_history(10)
 
@@ -600,7 +731,7 @@ def main():
 
         # Stream new scene
         narrative = stream_scene_text(
-            lore,
+            LORE_TEXT,
             st.session_state.history,
             client,
             extra_user=None,
@@ -654,7 +785,7 @@ def main():
             # Stream the opening scene into the main placeholder
             sanitize_history(10)
             narrative = stream_scene_text(
-                lore,
+                LORE_TEXT,
                 st.session_state.history,
                 client,
                 extra_user=scene_prompt,
@@ -681,11 +812,23 @@ def main():
             st.session_state.is_generating = False      # re-enable buttons
 
         if st.button("Reset Session", use_container_width=True):
+            pid = st.session_state.get("player_id", "")
+
+            # Remove the persisted save so we don't auto-load old progress
+            try:
+                delete_player_progress(pid)
+            except Exception:
+                pass
+
+            # Clear volatile state but keep the player id
             st.session_state.clear()
-            # Show the intro state until the user clicks Start New Story
-            st.session_state.hydrated_once = True   # <- prevents auto-hydrate on next run
-            st.session_state.is_generating = False
-            st.session_state.pending_choice = None
+            st.session_state["player_id"] = pid
+
+            # Allow hydrate next run (we just deleted the row)
+            st.session_state["hydrated_for_pid"] = None
+            st.session_state["is_generating"] = False
+            st.session_state["pending_choice"] = None
+
             st.rerun()
         
         st.divider()
