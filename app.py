@@ -7,6 +7,7 @@ from data.store import init_db, load_snapshot, save_snapshot, delete_snapshot, h
 from ui.controls import sidebar_controls, scene_and_choices
 import json
 from story.engine import stream_scene, generate_choices
+from ui.anim import inject_css, render_scene, render_thinking, render_choices
 
 st.set_page_config(page_title="Gloamreach — Storyworld MVP", layout="wide")
 
@@ -60,39 +61,42 @@ def _render_choices(choices: List[str], choices_ph):
             st.session_state["_picked"] = choices[1]
 
 def _stream_and_save_scene(pid: str, scene_ph, choices_ph):
-    """Stream a new scene into scene_ph, then compute choices into choices_ph."""
-    # Ensure history exists
+    # ensure history exists
     hist = st.session_state.setdefault("history", [])
 
-    # Clear UI slots
+    # clear UI slots
     scene_ph.empty()
     choices_ph.empty()
 
-    # Live stream the scene
+    # stream into the scene placeholder
     buf = ""
     for tok in stream_scene(hist, LORE):
         buf += tok or ""
-        scene_ph.markdown(buf)  # always write into the same placeholder
+        render_scene(scene_ph, buf)
 
     scene_text = buf.strip()
-    hist.append({"role": "assistant", "content": scene_text})
+    hist.append({"role":"assistant","content": scene_text})
     st.session_state["scene"] = scene_text
 
-    # Show a tiny “thinking…” stub while we fetch choices
-    with choices_ph.container():
-        st.caption("drafting choices…")
+    # show animated "thinking…" while we fetch choices
+    render_thinking(choices_ph)
 
-    # Fast non-stream call for two choices
+    # fast choices → save + render
     choices = generate_choices(hist, scene_text, LORE)
     st.session_state["choices"] = choices
     save_snapshot(pid, st.session_state["scene"], st.session_state["choices"], hist)
 
-    # Render choices in-place
-    _render_choices(choices, choices_ph)
+    turn_id = len(hist)
+    render_choices(choices, choices_ph, turn_id)
 
 
 def main():
     st.title("Gloamreach — Storyworld MVP")
+
+    # Atmosphere toggle
+    with st.sidebar:
+        anim_enabled = st.checkbox("Atmosphere (animations)", value=False, help="Fog, fades, and slide-in choices")
+    inject_css(anim_enabled)
 
     import os
     from data.store import store_name, init_db, save_snapshot, load_snapshot
@@ -165,10 +169,10 @@ def main():
     if not st.session_state.get("scene"):
         st.info("Click **Start New Story** in the sidebar to begin.")
     else:
-        # Scene goes into the fixed scene placeholder
-        scene_ph.markdown(st.session_state["scene"])
-        # Choices go into the fixed choices placeholder
-        _render_choices(st.session_state.get("choices", []), choices_ph)
+        render_scene(scene_ph, st.session_state["scene"])
+        turn_id = len(st.session_state.get("history", []))
+        render_choices(st.session_state.get("choices", []), choices_ph, turn_id)
+
 
     # 4) Choice handler (after UI triggers)
     picked = st.session_state.pop("_picked", None)
