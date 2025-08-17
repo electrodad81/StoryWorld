@@ -21,8 +21,7 @@ BASE_DIR = Path(__file__).parent.resolve()
 
 import inspect
 
-COOKIE_KEY_NEW = "story_uid_v2"
-COOKIE_KEY_OLD = "story_uid"   # we read this once for migration
+COOKIE_KEY = "story_uid"  # canonical; we will also delete any v2 on sight
 
 def _cookie_load(ctrl):
     if hasattr(ctrl, "load"):
@@ -78,56 +77,6 @@ def _cookie_remove(ctrl, name, path="/"):
             return None
         
 import streamlit.components.v1 as components
-
-def ensure_pid_bootstrap():
-    """
-    Browser-first identity bootstrap:
-      - Prefer cookie 'story_uid_v2', then 'story_uid', then localStorage 'story_uid_v3'
-      - If none exist, mint a new 32-hex id
-      - Persist to both cookies + localStorage (1 year)
-      - Ensure URL has ?pid=<id>; if it changes the URL, reload once
-    This runs *before* Python proceeds, so the server always sees a stable ?pid.
-    """
-    components.html("""
-<script>
-(function(){
-  const KEY_NEW = 'story_uid_v2';
-  const KEY_OLD = 'story_uid';
-  const KEY_LS  = 'story_uid_v3';
-
-  function getCookie(name){
-    const m = document.cookie.match(new RegExp('(?:^|; )'+name+'=([^;]*)'));
-    return m ? decodeURIComponent(m[1]) : null;
-  }
-  function randHex(n){
-    const b = new Uint8Array(n/2);
-    (window.crypto||window.msCrypto).getRandomValues(b);
-    return Array.from(b, x => x.toString(16).padStart(2,'0')).join('');
-  }
-
-  const url = new URL(window.location.href);
-  const pidUrl = url.searchParams.get('pid');
-
-  // choose existing id, prefer v2 cookie → old cookie → localStorage
-  let pid = getCookie(KEY_NEW) || getCookie(KEY_OLD) || window.localStorage.getItem(KEY_LS);
-  if (!pid) pid = randHex(32);
-
-  // persist everywhere (1 year)
-  window.localStorage.setItem(KEY_LS, pid);
-  const secure = (location.protocol === 'https:') ? '; Secure' : '';
-  document.cookie = KEY_NEW + '=' + pid + '; Path=/; SameSite=Lax; Max-Age=' + (365*24*60*60) + secure;
-  document.cookie = KEY_OLD + '=' + pid + '; Path=/; SameSite=Lax; Max-Age=' + (365*24*60*60) + secure;
-
-  // normalize URL and reload once if needed
-  if (pidUrl !== pid) {
-    url.searchParams.set('pid', pid);
-    window.location.replace(url.toString());
-  }
-})();
-</script>
-""", height=0)
-    # Stop this run; after the browser fixes the URL, Streamlit will rerun with ?pid present
-    st.stop()
 
 # -------------------------
 # Constants / Paths
@@ -389,93 +338,94 @@ try:
 except Exception:
     CookieController = None
 
-def _read_pid_from_url() -> str | None:
-    try:
-        q = getattr(st, "query_params", {})
-        val = q.get("pid")
-        if isinstance(val, list):
-            return val[0] if val else None
-        return val
-    except Exception:
-        q = st.experimental_get_query_params()
-        lst = q.get("pid", [])
-        return lst[0] if lst else None
+# --- Canonical ID: 'story_uid' cookie mirrored in ?pid=... ---
 
-def _write_pid_to_url(pid: str) -> None:
-    try:
+def url_get_pid() -> str | None:
+    val = st.query_params.get("pid", None)
+    if isinstance(val, list):
+        return val[0] if val else None
+    return val
+
+def url_set_pid(pid: str | None) -> None:
+    if pid is None:
+        if "pid" in st.query_params:
+            del st.query_params["pid"]
+    else:
         st.query_params["pid"] = pid
-    except Exception:
-        st.experimental_set_query_params(pid=pid)
 
-def get_or_set_player_id() -> str:
+import time, uuid
+
+COOKIE_KEY = "story_uid"  # canonical; we will also delete any v2 on sight
+
+def establish_player_id(wait_seconds: float = 3.0) -> str:
     """
-    Stable across refreshes AND app restarts:
-      - Prefer NEW cookie (story_uid_v2).
-      - If only OLD cookie exists, migrate to NEW and adopt it into URL.
-      - If both cookie & URL exist but differ, adopt cookie and overwrite URL.
-      - If only URL exists, adopt into NEW cookie.
-      - Else mint → set NEW cookie + URL → one-time rerun.
+    Canonical identity = cookie 'story_uid', mirrored to ?pid.
+    Prefers cookie → URL; waits up to `wait_seconds` for cookie bridge; mints only if still none.
+    Sets st.session_state['player_id'] and st.session_state['_pid_source'] = 'cookie'|'url'|'minted'.
     """
+    import time, uuid
+
     if st.session_state.get("player_id"):
         return st.session_state["player_id"]
 
+    # Mount cookie controller (if available) and load browser cookies
     ctrl = None
-    if CookieController:
+    if "CookieController" in globals() and CookieController:
         ctrl = st.session_state.get("_cookie_ctrl")
         if ctrl is None:
             st.session_state["_cookie_ctrl"] = CookieController(key="browser_cookie")
             ctrl = st.session_state["_cookie_ctrl"]
-        _cookie_load(ctrl)  # pull latest browser cookies
+        _cookie_load(ctrl)
 
-    pid_new  = ctrl.get(COOKIE_KEY_NEW) if ctrl else None
-    pid_old  = ctrl.get(COOKIE_KEY_OLD) if ctrl else None
-    pid_url  = _read_pid_from_url()
-    secure   = _bool_secret("COOKIE_SECURE", True)  # false on localhost
+    secure_flag = _bool_secret("COOKIE_SECURE", True)  # false on localhost
 
-    # 1) Prefer NEW cookie
-    if pid_new:
-        if pid_url != pid_new:
-            _write_pid_to_url(pid_new)
-        st.session_state["player_id"] = pid_new
-        return pid_new
+    # Start a wait window so we don't mint too early on first run after restart
+    start = st.session_state.get("_pid_wait_started_at")
+    if start is None:
+        start = time.time()
+        st.session_state["_pid_wait_started_at"] = start
 
-    # 2) Migrate OLD cookie -> NEW
-    if pid_old:
+    def choose_now():
+        pid_cookie = ctrl.get("story_uid") if ctrl else None
+        pid_url    = url_get_pid()
+        if pid_cookie:
+            return pid_cookie, "cookie"
+        if pid_url:
+            return pid_url, "url"
+        return None, None
+
+    chosen, source = choose_now()
+
+    # Wait briefly for the cookie bridge to mount if nothing visible yet
+    while not chosen and (time.time() - start) < wait_seconds:
+        time.sleep(0.15)
         if ctrl:
-            _cookie_set(ctrl, COOKIE_KEY_NEW, pid_old,
-                        max_age=365*24*60*60, path="/", secure=secure, same_site="Lax")
-            if hasattr(ctrl, "save"):
-                try: ctrl.save()
-                except Exception: pass
-        if pid_url != pid_old:
-            _write_pid_to_url(pid_old)
-        st.session_state["player_id"] = pid_old
-        return pid_old
+            _cookie_load(ctrl)
+        chosen, source = choose_now()
 
-    # 3) URL only -> adopt into NEW cookie
-    if pid_url:
-        if ctrl:
-            _cookie_set(ctrl, COOKIE_KEY_NEW, pid_url,
-                        max_age=365*24*60*60, path="/", secure=secure, same_site="Lax")
-            if hasattr(ctrl, "save"):
-                try: ctrl.save()
-                except Exception: pass
-        st.session_state["player_id"] = pid_url
-        return pid_url
+    # Still nothing → mint
+    if not chosen:
+        chosen, source = uuid.uuid4().hex, "minted"
 
-    # 4) Nothing -> mint -> set NEW cookie + URL -> rerun
-    pid = uuid.uuid4().hex
+    # Always write canonical cookie; remove any legacy v2 so it can't conflict
     if ctrl:
-        _cookie_set(ctrl, COOKIE_KEY_NEW, pid,
-                    max_age=365*24*60*60, path="/", secure=secure, same_site="Lax")
+        _cookie_set(
+            ctrl, "story_uid", chosen,
+            max_age=365*24*60*60, path="/",
+            secure=secure_flag, same_site="Lax",
+        )
+        _cookie_remove(ctrl, "story_uid_v2", path="/")
         if hasattr(ctrl, "save"):
             try: ctrl.save()
             except Exception: pass
-    _write_pid_to_url(pid)
-    st.session_state["player_id"] = pid
-    st.rerun()
-    return pid  # not reached
 
+    # Keep URL in sync with the chosen id
+    if url_get_pid() != chosen:
+        url_set_pid(chosen)
+
+    st.session_state["player_id"] = chosen
+    st.session_state["_pid_source"] = source
+    return chosen
 
 # -------------------------
 # Utilities
@@ -775,33 +725,28 @@ def generate_choices_from_scene(
 # Streamlit UI
 # -------------------------
 def main():
-    ensure_pid_bootstrap()              # guarantees ?pid is present
-    q = getattr(st, "query_params", {})
-    pid = q.get("pid") if not isinstance(q.get("pid"), list) else q.get("pid")[0]
-    st.session_state["player_id"] = pid
-    st.caption(f"pid:{pid[:8]} (bootstrapped)")
+    st.caption(f"EFFECTIVE COOKIE_SECURE = {_bool_secret('COOKIE_SECURE', True)}")
+    
+    pid = establish_player_id()
+    st.caption(f"pid:{pid[:8]} • source:{st.session_state.get('_pid_source')}")
 
-    # --- Identity debug (optional) ---
-    DEBUG_IDENTITY = True
-    if DEBUG_IDENTITY:
-        ctrl = st.session_state.get("_cookie_ctrl") if "CookieController" in globals() else None
-        cookie_new = cookie_old = None
-        if ctrl:
-            try:
-                _cookie_load(ctrl)
-                cookie_new = ctrl.get(COOKIE_KEY_NEW)
-                cookie_old = ctrl.get(COOKIE_KEY_OLD)
-            except Exception:
-                pass
-        url_id = _read_pid_from_url()
-        st.caption(
-            f"pid:{st.session_state['player_id'][:8]} • "
-            f"v2:{(cookie_new or '—')[:8]} • "
-            f"old:{(cookie_old or '—')[:8]} • "
-            f"url:{(url_id or '—')[:8]}"
-        )
-        
-    st.title(APP_TITLE)
+    # 1) STEP 5: Debug caption (canonical only)  ← place it HERE
+    ctrl = st.session_state.get("_cookie_ctrl")
+    cookie_id = None
+    if ctrl:
+        try:
+            _cookie_load(ctrl)
+            cookie_id = ctrl.get("story_uid")   # canonical key
+        except Exception:
+            pass
+    url_id = st.query_params.get("pid")
+    if isinstance(url_id, list):
+        url_id = url_id[0] if url_id else None
+    st.caption(
+        f"pid:{st.session_state['player_id'][:8]} • "
+        f"cookie:{(cookie_id or '—')[:8]} • "
+        f"url:{(url_id or '—')[:8]}"
+    )
 
     # Fresh placeholders per run
     story_ph = st.empty()
@@ -875,33 +820,6 @@ def main():
     with st.sidebar:
         st.subheader("Controls")
 
-        if st.button("Migrate cookie → v2 now"):
-            ctrl = st.session_state.get("_cookie_ctrl")
-            if ctrl:
-                _cookie_load(ctrl)
-                pid_cur   = st.session_state.get("player_id","")
-                old_val   = ctrl.get(COOKIE_KEY_OLD)
-                new_val   = ctrl.get(COOKIE_KEY_NEW)
-
-                # ensure v2 exists (set to current pid)
-                if not new_val and pid_cur:
-                    _cookie_set(
-                        ctrl, COOKIE_KEY_NEW, pid_cur,
-                        max_age=365*24*60*60, path="/",
-                        secure=_bool_secret("COOKIE_SECURE", True),
-                        same_site="Lax",
-                    )
-
-                # remove old only if present
-                if old_val is not None:
-                    _cookie_remove(ctrl, COOKIE_KEY_OLD, path="/")
-
-                if hasattr(ctrl, "save"):
-                    try: ctrl.save()
-                    except Exception: pass
-
-            st.rerun()
-
         if st.button("Start New Story", use_container_width=True):
             st.session_state.history = []
             st.session_state.scene_text = ""
@@ -949,19 +867,22 @@ def main():
             delete_sqlite_snapshot(keep_pid)
             st.rerun()
 
-        # Optional: switch to a fresh user id (clears ?pid)
+        # Switch to a fresh user id (clears URL pid + cookie + session)
         if st.button("Switch user (new id)", use_container_width=True):
-            try:
-                if hasattr(st, "query_params"):
-                    if "pid" in st.query_params:
-                        del st.query_params["pid"]
-                else:
-                    st.experimental_set_query_params()
-            except Exception:
-                st.experimental_set_query_params()
-            for k in ("player_id", "hydrated_for_pid", "_cookie_set_once"):
+            url_set_pid(None)  # remove ?pid
+
+            ctrl = st.session_state.get("_cookie_ctrl")
+            if ctrl:
+                _cookie_remove(ctrl, "story_uid", path="/")
+                if hasattr(ctrl, "save"):
+                    try: ctrl.save()
+                    except Exception: pass
+
+            for k in ("player_id", "hydrated_for_pid", "_cookie_set_once", "_pid_wait_checks", "_pid_wait_started_at"):
                 st.session_state.pop(k, None)
+
             st.rerun()
+
 
     # --- Scene render (main area) ---
     if st.session_state.scene_text:
