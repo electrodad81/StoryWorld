@@ -21,6 +21,9 @@ BASE_DIR = Path(__file__).parent.resolve()
 
 import inspect
 
+COOKIE_KEY_NEW = "story_uid_v2"
+COOKIE_KEY_OLD = "story_uid"   # we read this once for migration
+
 def _cookie_load(ctrl):
     if hasattr(ctrl, "load"):
         try:
@@ -50,16 +53,56 @@ def _cookie_set(ctrl, name, value, *, max_age=None, path="/", secure=None, same_
         return ctrl.set(name, value)
 
 def _cookie_remove(ctrl, name, path="/"):
-    """Call ctrl.remove(...) with compatible kwargs."""
+    import inspect
     try:
+        # try to avoid remove if it doesn't exist
+        try:
+            _cookie_load(ctrl)
+            if hasattr(ctrl, "get") and ctrl.get(name) is None:
+                return None
+        except Exception:
+            pass
+
         sig = inspect.signature(ctrl.remove)
         kwargs = {}
         if "path" in sig.parameters:
             kwargs["path"] = path
-        return ctrl.remove(name, **kwargs)
+        try:
+            return ctrl.remove(name, **kwargs)
+        except KeyError:
+            return None
     except TypeError:
-        return ctrl.remove(name)
+        try:
+            return ctrl.remove(name)
+        except KeyError:
+            return None
+        
+import streamlit.components.v1 as components
 
+def _sync_pid_with_local_storage():
+    # Keeps ?pid=… in the URL and in localStorage under "story_uid_v3"
+    components.html("""
+<script>
+(function(){
+  const KEY = 'story_uid_v3';
+  const url = new URL(window.location.href);
+  const pid = url.searchParams.get('pid');
+  const saved = window.localStorage.getItem(KEY);
+
+  // If URL has no pid but we have one saved, restore it and reload once
+  if (!pid && saved) {
+    url.searchParams.set('pid', saved);
+    window.location.replace(url.toString());
+    return;
+  }
+
+  // If URL has pid but storage is empty or different, update storage
+  if (pid && (!saved || saved !== pid)) {
+    window.localStorage.setItem(KEY, pid);
+  }
+})();
+</script>
+""", height=0)
 
 # -------------------------
 # Constants / Paths
@@ -342,55 +385,64 @@ def _write_pid_to_url(pid: str) -> None:
 def get_or_set_player_id() -> str:
     """
     Stable across refreshes AND app restarts:
-      - Prefer cookie (long-lived).
-      - If cookie & URL differ, adopt cookie and overwrite URL.
-      - If only URL exists, adopt into cookie.
-      - Else mint → set both → one-time rerun.
+      - Prefer NEW cookie (story_uid_v2).
+      - If only OLD cookie exists, migrate to NEW and adopt it into URL.
+      - If both cookie & URL exist but differ, adopt cookie and overwrite URL.
+      - If only URL exists, adopt into NEW cookie.
+      - Else mint → set NEW cookie + URL → one-time rerun.
     """
     if st.session_state.get("player_id"):
         return st.session_state["player_id"]
 
-    # init cookie controller
     ctrl = None
     if CookieController:
         ctrl = st.session_state.get("_cookie_ctrl")
         if ctrl is None:
             st.session_state["_cookie_ctrl"] = CookieController(key="browser_cookie")
             ctrl = st.session_state["_cookie_ctrl"]
-        _cookie_load(ctrl)  # ensure latest browser cookies are visible
+        _cookie_load(ctrl)  # pull latest browser cookies
 
-    pid_cookie = ctrl.get("story_uid") if ctrl else None
-    pid_url = _read_pid_from_url()
+    pid_new  = ctrl.get(COOKIE_KEY_NEW) if ctrl else None
+    pid_old  = ctrl.get(COOKIE_KEY_OLD) if ctrl else None
+    pid_url  = _read_pid_from_url()
+    secure   = _bool_secret("COOKIE_SECURE", True)  # false on localhost
 
-    secure = _bool_secret("COOKIE_SECURE", True)  # set to false locally for http://
+    # 1) Prefer NEW cookie
+    if pid_new:
+        if pid_url != pid_new:
+            _write_pid_to_url(pid_new)
+        st.session_state["player_id"] = pid_new
+        return pid_new
 
-    # CASE 1: both exist but DIFFER -> adopt cookie, overwrite URL
-    if pid_cookie and pid_url and pid_cookie != pid_url:
-        _write_pid_to_url(pid_cookie)
-        st.session_state["player_id"] = pid_cookie
-        return pid_cookie
+    # 2) Migrate OLD cookie -> NEW
+    if pid_old:
+        if ctrl:
+            _cookie_set(ctrl, COOKIE_KEY_NEW, pid_old,
+                        max_age=365*24*60*60, path="/", secure=secure, same_site="Lax")
+            if hasattr(ctrl, "save"):
+                try: ctrl.save()
+                except Exception: pass
+        if pid_url != pid_old:
+            _write_pid_to_url(pid_old)
+        st.session_state["player_id"] = pid_old
+        return pid_old
 
-    # CASE 2: cookie exists (URL may or may not) -> prefer cookie, ensure URL
-    if pid_cookie:
-        if not pid_url:
-            _write_pid_to_url(pid_cookie)
-        st.session_state["player_id"] = pid_cookie
-        return pid_cookie
-
-    # CASE 3: URL exists but cookie missing -> adopt URL into cookie
+    # 3) URL only -> adopt into NEW cookie
     if pid_url:
         if ctrl:
-            _cookie_set(ctrl, "story_uid", pid_url, max_age=365*24*60*60, path="/", secure=secure, same_site="Lax")
+            _cookie_set(ctrl, COOKIE_KEY_NEW, pid_url,
+                        max_age=365*24*60*60, path="/", secure=secure, same_site="Lax")
             if hasattr(ctrl, "save"):
                 try: ctrl.save()
                 except Exception: pass
         st.session_state["player_id"] = pid_url
         return pid_url
 
-    # CASE 4: neither exists -> mint → set both → one-time rerun
+    # 4) Nothing -> mint -> set NEW cookie + URL -> rerun
     pid = uuid.uuid4().hex
     if ctrl:
-        _cookie_set(ctrl, "story_uid", pid, max_age=365*24*60*60, path="/", secure=secure, same_site="Lax")
+        _cookie_set(ctrl, COOKIE_KEY_NEW, pid,
+                    max_age=365*24*60*60, path="/", secure=secure, same_site="Lax")
         if hasattr(ctrl, "save"):
             try: ctrl.save()
             except Exception: pass
@@ -698,22 +750,26 @@ def generate_choices_from_scene(
 # Streamlit UI
 # -------------------------
 def main():
+    _sync_pid_with_local_storage()     # << add this first
     # Stable, URL-locked player id (no cookies)
     pid = get_or_set_player_id()
+    st.caption(f"pid:{pid[:8]} (cookie+url+localStorage)")
 
     # Debug: show both sources so we can confirm they match
-    cookie_id = None
     ctrl = st.session_state.get("_cookie_ctrl")
     if ctrl:
-        try:
-            _cookie_load(ctrl)
-            cookie_id = ctrl.get("story_uid")
-        except Exception:
-            cookie_id = "(error)"
-    url_id = _read_pid_from_url()
-    st.caption(f"player_id: {pid[:8]}… • cookie: {str(cookie_id)[:8] if cookie_id else 'None'} • url: {str(url_id)[:8] if url_id else 'None'}")
+        _cookie_load(ctrl)  # pull latest from the browser
 
-    st.caption(f"player_id: {pid[:8]}… (sticky via cookie + URL)")
+    cookie_new = ctrl.get(COOKIE_KEY_NEW) if ctrl else None
+    cookie_old = ctrl.get(COOKIE_KEY_OLD) if ctrl else None
+    url_id     = _read_pid_from_url()
+
+    st.caption(
+        f"pid:{st.session_state['player_id'][:8]} • "
+        f"v2:{(cookie_new or 'None')[:8]} • "
+        f"old:{(cookie_old or 'None')[:8]} • "
+        f"url:{(url_id or 'None')[:8]}"
+    )
 
     st.title(APP_TITLE)
 
@@ -788,6 +844,33 @@ def main():
     # Sidebar controls
     with st.sidebar:
         st.subheader("Controls")
+
+        if st.button("Migrate cookie → v2 now"):
+            ctrl = st.session_state.get("_cookie_ctrl")
+            if ctrl:
+                _cookie_load(ctrl)
+                pid_cur   = st.session_state.get("player_id","")
+                old_val   = ctrl.get(COOKIE_KEY_OLD)
+                new_val   = ctrl.get(COOKIE_KEY_NEW)
+
+                # ensure v2 exists (set to current pid)
+                if not new_val and pid_cur:
+                    _cookie_set(
+                        ctrl, COOKIE_KEY_NEW, pid_cur,
+                        max_age=365*24*60*60, path="/",
+                        secure=_bool_secret("COOKIE_SECURE", True),
+                        same_site="Lax",
+                    )
+
+                # remove old only if present
+                if old_val is not None:
+                    _cookie_remove(ctrl, COOKIE_KEY_OLD, path="/")
+
+                if hasattr(ctrl, "save"):
+                    try: ctrl.save()
+                    except Exception: pass
+
+            st.rerun()
 
         if st.button("Start New Story", use_container_width=True):
             st.session_state.history = []
