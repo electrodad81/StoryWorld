@@ -79,30 +79,55 @@ def _cookie_remove(ctrl, name, path="/"):
         
 import streamlit.components.v1 as components
 
-def _sync_pid_with_local_storage():
-    # Keeps ?pid=… in the URL and in localStorage under "story_uid_v3"
+def ensure_pid_bootstrap():
+    """
+    Browser-first identity bootstrap:
+      - Prefer cookie 'story_uid_v2', then 'story_uid', then localStorage 'story_uid_v3'
+      - If none exist, mint a new 32-hex id
+      - Persist to both cookies + localStorage (1 year)
+      - Ensure URL has ?pid=<id>; if it changes the URL, reload once
+    This runs *before* Python proceeds, so the server always sees a stable ?pid.
+    """
     components.html("""
 <script>
 (function(){
-  const KEY = 'story_uid_v3';
-  const url = new URL(window.location.href);
-  const pid = url.searchParams.get('pid');
-  const saved = window.localStorage.getItem(KEY);
+  const KEY_NEW = 'story_uid_v2';
+  const KEY_OLD = 'story_uid';
+  const KEY_LS  = 'story_uid_v3';
 
-  // If URL has no pid but we have one saved, restore it and reload once
-  if (!pid && saved) {
-    url.searchParams.set('pid', saved);
-    window.location.replace(url.toString());
-    return;
+  function getCookie(name){
+    const m = document.cookie.match(new RegExp('(?:^|; )'+name+'=([^;]*)'));
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+  function randHex(n){
+    const b = new Uint8Array(n/2);
+    (window.crypto||window.msCrypto).getRandomValues(b);
+    return Array.from(b, x => x.toString(16).padStart(2,'0')).join('');
   }
 
-  // If URL has pid but storage is empty or different, update storage
-  if (pid && (!saved || saved !== pid)) {
-    window.localStorage.setItem(KEY, pid);
+  const url = new URL(window.location.href);
+  const pidUrl = url.searchParams.get('pid');
+
+  // choose existing id, prefer v2 cookie → old cookie → localStorage
+  let pid = getCookie(KEY_NEW) || getCookie(KEY_OLD) || window.localStorage.getItem(KEY_LS);
+  if (!pid) pid = randHex(32);
+
+  // persist everywhere (1 year)
+  window.localStorage.setItem(KEY_LS, pid);
+  const secure = (location.protocol === 'https:') ? '; Secure' : '';
+  document.cookie = KEY_NEW + '=' + pid + '; Path=/; SameSite=Lax; Max-Age=' + (365*24*60*60) + secure;
+  document.cookie = KEY_OLD + '=' + pid + '; Path=/; SameSite=Lax; Max-Age=' + (365*24*60*60) + secure;
+
+  // normalize URL and reload once if needed
+  if (pidUrl !== pid) {
+    url.searchParams.set('pid', pid);
+    window.location.replace(url.toString());
   }
 })();
 </script>
 """, height=0)
+    # Stop this run; after the browser fixes the URL, Streamlit will rerun with ?pid present
+    st.stop()
 
 # -------------------------
 # Constants / Paths
@@ -750,27 +775,32 @@ def generate_choices_from_scene(
 # Streamlit UI
 # -------------------------
 def main():
-    _sync_pid_with_local_storage()     # << add this first
-    # Stable, URL-locked player id (no cookies)
-    pid = get_or_set_player_id()
-    st.caption(f"pid:{pid[:8]} (cookie+url+localStorage)")
+    ensure_pid_bootstrap()              # guarantees ?pid is present
+    q = getattr(st, "query_params", {})
+    pid = q.get("pid") if not isinstance(q.get("pid"), list) else q.get("pid")[0]
+    st.session_state["player_id"] = pid
+    st.caption(f"pid:{pid[:8]} (bootstrapped)")
 
-    # Debug: show both sources so we can confirm they match
-    ctrl = st.session_state.get("_cookie_ctrl")
-    if ctrl:
-        _cookie_load(ctrl)  # pull latest from the browser
-
-    cookie_new = ctrl.get(COOKIE_KEY_NEW) if ctrl else None
-    cookie_old = ctrl.get(COOKIE_KEY_OLD) if ctrl else None
-    url_id     = _read_pid_from_url()
-
-    st.caption(
-        f"pid:{st.session_state['player_id'][:8]} • "
-        f"v2:{(cookie_new or 'None')[:8]} • "
-        f"old:{(cookie_old or 'None')[:8]} • "
-        f"url:{(url_id or 'None')[:8]}"
-    )
-
+    # --- Identity debug (optional) ---
+    DEBUG_IDENTITY = True
+    if DEBUG_IDENTITY:
+        ctrl = st.session_state.get("_cookie_ctrl") if "CookieController" in globals() else None
+        cookie_new = cookie_old = None
+        if ctrl:
+            try:
+                _cookie_load(ctrl)
+                cookie_new = ctrl.get(COOKIE_KEY_NEW)
+                cookie_old = ctrl.get(COOKIE_KEY_OLD)
+            except Exception:
+                pass
+        url_id = _read_pid_from_url()
+        st.caption(
+            f"pid:{st.session_state['player_id'][:8]} • "
+            f"v2:{(cookie_new or '—')[:8]} • "
+            f"old:{(cookie_old or '—')[:8]} • "
+            f"url:{(url_id or '—')[:8]}"
+        )
+        
     st.title(APP_TITLE)
 
     # Fresh placeholders per run
