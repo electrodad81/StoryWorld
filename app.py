@@ -68,6 +68,27 @@ def hydrate_once_for(pid: str):
         st.session_state["history"] = []
     st.session_state["hydrated_for_pid"] = pid
 
+# --- Dev UI toggle (off by default) ------------------------------------------
+def _truthy(x) -> bool:
+    return str(x).strip().lower() in ("1", "true", "yes", "on")
+
+def _dev_default() -> bool:
+    import os
+    # Secrets/env can turn it on globally
+    if _truthy(os.getenv("DEBUG_UI") or st.secrets.get("DEBUG_UI", False)):
+        return True
+    # URL param ?dev=1 enables it per-session
+    try:
+        qp = getattr(st, "query_params", {})
+        val = qp.get("dev")
+        if isinstance(val, list):
+            val = val[0] if val else ""
+    except Exception:
+        q = st.experimental_get_query_params()
+        val = (q.get("dev", [""]) or [""])[0]
+    return _truthy(val)
+
+
 def start_new_story(pid: str):
     # Defer the streaming to the next run so we don't render the old UI first
     st.session_state["_start_new_pending"] = True
@@ -119,43 +140,51 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool):
 def main():
     st.title("Gloamreach — Storyworld MVP")
 
-    # Atmosphere toggle (OFF by default)
+    # --- Atmosphere toggle (visible to everyone) ---
     with st.sidebar:
         anim_enabled = st.checkbox("Atmosphere (lantern + typewriter)", value=False)
     if anim_enabled:
         inject_css()
 
-    # Backend info + tiny self-test
-    import os, json
-    from data.store import store_name, init_db, save_snapshot, load_snapshot
+    # --- Developer mode (hidden unless ?dev=1 or DEBUG_UI=true) ---
+    # initialize once per session
+    if "_dev" not in st.session_state:
+        try:
+            st.session_state["_dev"] = _dev_default()  # helper you added earlier
+        except NameError:
+            st.session_state["_dev"] = False  # safe fallback if helper not present
+    # allow turning dev UI off during the session
+    with st.sidebar:
+        if st.session_state["_dev"]:
+            st.session_state["_dev"] = st.checkbox("Developer tools", value=True, help="Show debug info & self-tests")
+    dev = bool(st.session_state["_dev"])
 
-    db_url = os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL")
-    st.caption(f"Backend: {store_name().capitalize()} • DATABASE_URL present: {bool(db_url)}")
-
-    with st.sidebar.expander("DB self-test", expanded=False):
-        pid_for_test = st.session_state.get("browser_id", "no-id")
-        if st.button("Write probe row"):
-            init_db()
-            save_snapshot(pid_for_test, "PROBE_SCENE", ["A","B"], [{"role":"assistant","content":"probe"}])
-            st.success("Wrote probe row")
-        if st.button("Read probe row"):
-            snap = load_snapshot(pid_for_test)
-            st.code(json.dumps(snap, indent=2))
-
-    # 0) Identity (stable across refresh & restart)
+    # --- Identity & storage ---
+    from data.store import store_name, init_db, save_snapshot, load_snapshot, delete_snapshot
     pid = ensure_browser_id()
-    st.caption(f"player_id: {pid[:8]}… • storage: {store_name().capitalize()}")
-
-    # 1) Persistence
     init_db()
     hydrate_once_for(pid)
 
-    # 2) Fixed slots for this run
+    # --- Debug UI (only in dev mode) ---
+    if dev:
+        import os, json
+        db_url = os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL")
+        with st.sidebar.expander("DB self-test", expanded=False):
+            pid_for_test = st.session_state.get("browser_id", "no-id")
+            if st.button("Write probe row"):
+                init_db()
+                save_snapshot(pid_for_test, "PROBE_SCENE", ["A","B"], [{"role":"assistant","content":"probe"}])
+                st.success("Wrote probe row")
+            if st.button("Read probe row"):
+                snap = load_snapshot(pid_for_test)
+                st.code(json.dumps(snap, indent=2))
+
+    # --- Fixed slots for this run ---
     scene_ph   = st.empty()
     choices_ph = st.empty()
 
-    # 3) Deferred work FIRST (no duplicate text)
-    # 3a) Starting a brand new story
+    # --- Deferred work FIRST (no duplicate text) ---
+    # 1) Starting a brand new story
     if st.session_state.pop("_start_new_pending", False):
         st.session_state["history"] = []
         st.session_state["scene"] = None
@@ -163,14 +192,14 @@ def main():
         _advance_turn(pid, scene_ph, choices_ph, anim_enabled)
         return  # prevent old UI from rendering under streamed scene
 
-    # 3b) Applying a pending choice
+    # 2) Applying a pending choice
     pending = st.session_state.pop("_pending_choice", None)
     if pending is not None:
         st.session_state["history"].append({"role": "user", "content": pending})
         _advance_turn(pid, scene_ph, choices_ph, anim_enabled)
         return
 
-    # 4) Sidebar controls → actions
+    # --- Sidebar controls → actions ---
     action = sidebar_controls(pid)
     if action == "start":
         start_new_story(pid)
@@ -181,32 +210,22 @@ def main():
             st.session_state.pop(k, None)
         st.experimental_set_query_params()  # no-op on newer Streamlit; tidy on older
         st.rerun()
-    elif action == "switch_user":
-        # clear storage for this user; simulate "new browser"
-        delete_snapshot(pid)
-        clear_browser_id_and_reload()
-        st.stop()
-
-    # 5) Normal render (no pending work)
+        
+    # --- Normal render (no pending work) ---
     if not st.session_state.get("scene"):
         st.info("Click **Start New Story** in the sidebar to begin.")
     else:
-        # If you kept the plain UI:
         scene_ph.markdown(st.session_state["scene"])
         turn_id = len(st.session_state.get("history", []))
         render_choices(st.session_state.get("choices", []), choices_ph, turn_id)
-        # If you’re using the adapter helpers instead, swap the two lines above for:
-        # _scene_render(scene_ph, st.session_state["scene"])
-        # _choices_render(st.session_state.get("choices", []), choices_ph, turn_id)
 
-    # 6) Choice handler (after UI triggers)
+    # --- Choice handler (after UI triggers) ---
     picked = st.session_state.pop("_picked", None)
     if picked:
         apply_choice(pid, picked)
         st.rerun()
 
-    # Footnote
-    st.caption("Live-streamed scenes • Stable choices grid • SQLite/Neon persistence")
+    # (No public debug/footer text; dev UI is gated above)
 
 if __name__ == "__main__":
     main()

@@ -8,14 +8,11 @@ Action = Optional[Literal["start", "reset", "switch_user"]]
 def sidebar_controls(pid: str) -> Action:
     with st.sidebar:
         st.header("Controls")
-        st.caption(f"player_id: {pid[:8]}…")
         col1, col2 = st.columns(2)
         if col1.button("Start New Story", use_container_width=True):
             return "start"
         if col2.button("Reset Session", use_container_width=True):
             return "reset"
-        if st.button("Switch user (new id)", use_container_width=True):
-            return "switch_user"
     return None
 
 def scene_and_choices(scene: str, choices: list[str]) -> None:
