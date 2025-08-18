@@ -60,6 +60,13 @@ def init_db():
           updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
         );
         """)
+        
+        # Ensure username column exists for user tracking
+        cur.execute("""
+        ALTER TABLE public.story_progress
+        ADD COLUMN IF NOT EXISTS username TEXT
+        """)    
+
         # Backfill for older deployments
         cur.execute("""
           ALTER TABLE public.story_progress
@@ -84,41 +91,42 @@ def _count_decisions(history) -> int:
     except Exception:
         return 0
 
-def save_snapshot(user_id, scene, choices, history):
-    """Upsert the user's latest state and auto-maintain decisions_count."""
+def save_snapshot(user_id, scene, choices, history, username=None):
+    """Upsert the user's latest state, maintain decisions_count, and (optionally) store username."""
     decisions_count = _count_decisions(history)
-    payload = (
-        user_id,
-        scene,
-        json.dumps(choices),
-        json.dumps(history),
-        decisions_count,
-    )
     with _connect() as conn, conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO public.story_progress(user_id, scene, choices, history, decisions_count)
-            VALUES (%s, %s, %s::jsonb, %s::jsonb, %s)
+            INSERT INTO public.story_progress(user_id, scene, choices, history, decisions_count, username)
+            VALUES (%s, %s, %s::jsonb, %s::jsonb, %s, %s)
             ON CONFLICT (user_id)
             DO UPDATE SET scene=EXCLUDED.scene,
                           choices=EXCLUDED.choices,
                           history=EXCLUDED.history,
                           decisions_count=EXCLUDED.decisions_count,
+                          -- only overwrite if a new non-null username is provided
+                          username=COALESCE(EXCLUDED.username, public.story_progress.username),
                           updated_at=now();
-        """, payload)
+        """, (user_id, scene, json.dumps(choices), json.dumps(history), decisions_count, username))
         conn.commit()
 
 def load_snapshot(user_id):
     with _connect() as conn, conn.cursor() as cur:
         cur.execute("""
-            SELECT scene, choices, history, decisions_count
+            SELECT scene, choices, history, decisions_count, username
             FROM public.story_progress
             WHERE user_id=%s
         """, (user_id,))
         row = cur.fetchone()
-        if not row: return None
-        scene, choices, history, decisions_count = row
-        return {"scene": scene, "choices": choices, "history": history, "decisions_count": decisions_count}
-
+        if not row:
+            return None
+        scene, choices, history, decisions_count, username = row
+        return {
+            "scene": scene,
+            "choices": choices,
+            "history": history,
+            "decisions_count": decisions_count,
+            "username": username,
+        }
 def delete_snapshot(user_id):
     with _connect() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM public.story_progress WHERE user_id=%s", (user_id,))

@@ -55,18 +55,27 @@ def inject_css():
 """, unsafe_allow_html=True)
 
 def hydrate_once_for(pid: str):
-    """Load snapshot once per pid into session_state."""
+    """Load snapshot once per pid into session_state (scene, choices, history, username)."""
     if st.session_state.get("hydrated_for_pid") == pid:
         return
+
     snap = load_snapshot(pid)
+
     if snap:
-        st.session_state["scene"] = snap["scene"]
-        st.session_state["choices"] = snap["choices"]
-        st.session_state["history"] = snap["history"]
+        st.session_state["scene"]   = snap.get("scene") or ""
+        st.session_state["choices"] = snap.get("choices") or []
+        st.session_state["history"] = snap.get("history") or []
+        # Only set username if the widget hasn't created the key this run
+        if snap.get("username") and "player_username" not in st.session_state:
+            st.session_state["player_username"] = snap["username"]
+        else:
+            st.session_state.setdefault("player_username", "")
     else:
-        st.session_state["scene"] = None
+        st.session_state["scene"] = ""
         st.session_state["choices"] = []
         st.session_state["history"] = []
+        st.session_state.setdefault("player_username", "")
+
     st.session_state["hydrated_for_pid"] = pid
 
 # --- Dev UI toggle (off by default) ------------------------------------------
@@ -161,60 +170,59 @@ def _render_choices(choices: List[str], choices_ph):
 CHOICE_COUNT = 2
 
 def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool):
+    from data.store import save_snapshot, save_visit
     # Ensure required state exists
     st.session_state.setdefault("history", [])
     st.session_state.setdefault("choices", [])
     st.session_state.setdefault("scene", "")
 
-    # --- NEW: capture context from the *previous* turn (before we overwrite it)
+    # Capture prior choices (for choice_index) and the picked label
     old_choices = list(st.session_state.get("choices", []))
-    # Record the user's clicked choice as a user turn (for counting/keys/DB)
     picked = st.session_state.get("pending_choice")
+
+    # Record the player's selection as a 'user' turn (once)
     if picked and picked != "__start__":
         hist = st.session_state["history"]
         if not hist or hist[-1].get("role") != "user" or hist[-1].get("content") != picked:
             hist.append({"role": "user", "content": picked})
-    if picked and picked != "__start__":
-        # log the player's selection as a 'user' turn (for LLM context and counting)
-        hist = st.session_state.get("history", [])
-        if not hist or hist[-1].get("role") != "user" or hist[-1].get("content") != picked:
-            st.session_state["history"].append({"role": "user", "content": picked})
 
-    # keep grid visible during work
+    # Keep grid visible during work
     render_choices_grid(grid_slot, choices=None, generating=True, count=CHOICE_COUNT)
 
-    # stream the next scene (lantern + caret if enabled)
+    # Stream the next scene (lantern + caret if enabled)
     if anim_enabled:
         with lantern("Summoning the next scene…"):
-            full = stream_text(stream_scene(st.session_state["history"], LORE), story_slot, show_caret=True)
+            full = stream_text(stream_scene(st.session_state["history"], LORE),
+                               story_slot, show_caret=True)
     else:
-        full = stream_text(stream_scene(st.session_state["history"], LORE), story_slot, show_caret=False)
+        full = stream_text(stream_scene(st.session_state["history"], LORE),
+                           story_slot, show_caret=False)
 
-    # save to history
+    # Save to history
     st.session_state["history"].append({"role": "assistant", "content": full})
     st.session_state["scene"] = full
 
-    # compute choices (fast), save, and render them
+    # Compute choices (fast) and stash
     choices = generate_choices(st.session_state["history"], full, LORE)
     st.session_state["choices"] = choices
 
-    # Persist main snapshot (decisions_count auto-computed in the backend)
-    save_snapshot(pid, full, choices, st.session_state["history"])
+    # Persist snapshot (decisions_count auto-computed) — pass USERNAME here
+    username = st.session_state.get("player_username") or None
+    save_snapshot(pid, full, choices, st.session_state["history"], username=username)
 
-    # --- NEW: log this screen in story_visits with the choice that led here (if any)
-    choice_text = None
-    choice_index = None
+    # Log this screen in story_visits with the choice that led here (if any)
+    choice_text, choice_index = None, None
     if picked and picked != "__start__":
         choice_text = str(picked)
         try:
             choice_index = int(old_choices.index(choice_text))  # 0-based
         except Exception:
-            # Choice text didn't match the previous grid (rare/stale UI) — leave index as None
             choice_index = None
     save_visit(pid, full, choice_text, choice_index)
 
-    # render fresh buttons
+    # Render fresh buttons
     render_choices_grid(grid_slot, choices=choices, generating=False, count=CHOICE_COUNT)
+
 
 
 def main():
@@ -269,6 +277,16 @@ def main():
 
     # --- Hydrate AFTER handling actions so we don't revive old snapshots ---
     hydrate_once_for(pid)
+
+    # now render the sidebar
+    with st.sidebar:
+        username = st.text_input(
+            "Player username (optional)",
+            key="player_username",          # don't pass `value=`; let session_state supply it
+            placeholder="e.g., Bastion",
+            max_chars=24,
+            help="Used in NPC dialogue only. You can change this anytime.",
+        )
 
     # --- Debug UI (only in dev mode) ---
     if dev:
