@@ -1,11 +1,13 @@
 # story/engine.py
 from __future__ import annotations
-import os, json, time, random
-from typing import Dict, List, Generator, Optional
+import os, json, re
+from typing import Dict, List, Generator
 
 import streamlit as st
 from openai import OpenAI
 from openai.types.chat import ChatCompletionChunk
+
+from utils.retry import retry_call
 
 # Models: tweak if you prefer
 SCENE_MODEL = os.getenv("SCENE_MODEL", "gpt-4o")
@@ -81,24 +83,32 @@ def stream_scene(history: List[Dict[str,str]], lore: Dict) -> Generator[str, Non
         except Exception:
             pass
 
-def _retry(n=3, base=0.4, jitter=0.4):
-    def decorator(fn):
-        def wrapper(*a, **kw):
-            last = None
-            for i in range(n):
-                try:
-                    return fn(*a, **kw)
-                except Exception as e:
-                    last = e
-                    time.sleep(base*(2**i) + random.random()*jitter)
-            raise last
-        return wrapper
-    return decorator
+def _coerce_two_choices(text: str) -> List[str]:
+    """
+    Try hard to extract exactly two short strings from model output.
+    Prefers JSON array; falls back to line parsing.
+    """
+    if not text:
+        return []
+    # Prefer JSON array (possibly inside a code fence)
+    fence_match = re.search(r"\[.*\]", text, re.DOTALL)
+    candidate = fence_match.group(0) if fence_match else text
+    try:
+        arr = json.loads(candidate)
+        if isinstance(arr, list):
+            items = [str(x).strip() for x in arr if str(x).strip()]
+            return items[:2]
+    except Exception:
+        pass
+    # Fallback: split lines / bullets
+    lines = [re.sub(r"^[-•\d\.)\s]+", "", ln).strip() for ln in text.splitlines()]
+    lines = [ln for ln in lines if ln]
+    return lines[:2]
 
-@_retry()
 def generate_choices(history: List[Dict[str,str]], last_scene: str, lore: Dict) -> List[str]:
     """
     Fast non-stream call that returns exactly TWO short choice labels (<= 48 chars each).
+    Uses retry/backoff for robustness, leaving streaming path unchanged.
     """
     sys = (
         "You generate crisp, enticing choice labels for an interactive story. "
@@ -113,22 +123,24 @@ def generate_choices(history: List[Dict[str,str]], last_scene: str, lore: Dict) 
         "Return ONLY JSON like [\"<choice 1>\", \"<choice 2>\"]"
     )
     cli = _client()
-    resp = cli.chat.completions.create(
-        model=CHOICE_MODEL,
-        messages=[{"role":"system","content": sys},
-                  {"role":"user","content": user}],
-        temperature=0.7,
-        max_tokens=100,
-    )
-    txt = resp.choices[0].message.content or "[]"
-    try:
-        arr = json.loads(txt)
-        out = [str(x).strip() for x in arr][:2]
+
+    def _call():
+        resp = cli.chat.completions.create(
+            model=CHOICE_MODEL,
+            messages=[{"role":"system","content": sys},
+                      {"role":"user","content": user}],
+            temperature=0.7,
+            max_tokens=100,
+        )
+        txt = (resp.choices[0].message.content or "").strip()
+        out = _coerce_two_choices(txt)
         if len(out) < 2:
-            raise ValueError("need two choices")
-        # tighten length
-        out = [c[:48] for c in out]
+            # Minimal safe fallback if model under-delivers
+            out = ["Investigate further", "Retreat to safety"]
+        # tighten length and ensure exactly two
+        out = [c[:48] for c in out][:2]
+        if len(out) < 2:
+            out = (out + ["Continue deeper into the current thread."])[:2]
         return out
-    except Exception:
-        # fallback if model didn't parse
-        return ["Investigate further", "Retreat to safety"]
+
+    return retry_call(_call, tries=3, base=0.6)

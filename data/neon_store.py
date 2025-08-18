@@ -4,6 +4,24 @@ import os, json, psycopg2
 from typing import Optional, Dict, Any
 import streamlit as st
 from psycopg2.extras import register_default_jsonb
+from contextlib import contextmanager
+
+DSN = os.getenv("DATABASE_URL")
+
+@contextmanager
+def _connect():
+    conn = psycopg2.connect(
+        DSN,
+        connect_timeout=5,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+    )
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 def _db_url() -> str:
     url = os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL")
@@ -27,48 +45,96 @@ CREATE TABLE IF NOT EXISTS public.story_progress (
 );
 """
 
-def init_db() -> None:
-    with _get_conn() as con:
-        with con.cursor() as cur:
-            cur.execute(_SCHEMA)
+def init_db():
+    if not DSN:
+        return
+    with _connect() as conn, conn.cursor() as cur:
+        # Main progress table
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS public.story_progress(
+          user_id         TEXT PRIMARY KEY,
+          scene           TEXT NOT NULL,
+          choices         JSONB NOT NULL,
+          history         JSONB NOT NULL,
+          decisions_count INTEGER NOT NULL DEFAULT 0,
+          updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        """)
+        # Backfill for older deployments
+        cur.execute("""
+          ALTER TABLE public.story_progress
+          ADD COLUMN IF NOT EXISTS decisions_count INTEGER NOT NULL DEFAULT 0;
+        """)
+        # Visit log table (every screen the user has seen)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS public.story_visits(
+          id            BIGSERIAL PRIMARY KEY,
+          user_id       TEXT NOT NULL,
+          visited_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+          scene         TEXT NOT NULL,
+          choice_text   TEXT,          -- choice that led to this scene (NULL on first scene)
+          choice_index  INTEGER        -- 0-based index of the chosen option (NULL on first scene)
+        );
+        """)
+        conn.commit()
 
-def save_snapshot(user_id: str, scene: str, choices: list[str], history: list[Dict[str, Any]]) -> None:
-    with _get_conn() as con:
-        with con.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO public.story_progress (user_id, scene, choices, history)
-                VALUES (%s, %s, %s::jsonb, %s::jsonb)
-                ON CONFLICT (user_id) DO UPDATE SET
-                  scene = EXCLUDED.scene,
-                  choices = EXCLUDED.choices,
-                  history = EXCLUDED.history,
-                  updated_at = now();
-                """,
-                (user_id, scene, json.dumps(choices), json.dumps(history)),
-            )
+def _count_decisions(history) -> int:
+    try:
+        return sum(1 for m in history if isinstance(m, dict) and m.get("role") == "user" and m.get("content"))
+    except Exception:
+        return 0
 
-def load_snapshot(user_id: str) -> Optional[Dict[str, Any]]:
-    with _get_conn() as con:
-        with con.cursor() as cur:
-            cur.execute(
-                "SELECT scene, choices, history FROM public.story_progress WHERE user_id = %s",
-                (user_id,),
-            )
-            row = cur.fetchone()
-            if not row:
-                return None
-            scene, choices, history = row
-            # choices/history already parsed by register_default_jsonb
-            return {"scene": scene, "choices": choices, "history": history}
+def save_snapshot(user_id, scene, choices, history):
+    """Upsert the user's latest state and auto-maintain decisions_count."""
+    decisions_count = _count_decisions(history)
+    payload = (
+        user_id,
+        scene,
+        json.dumps(choices),
+        json.dumps(history),
+        decisions_count,
+    )
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO public.story_progress(user_id, scene, choices, history, decisions_count)
+            VALUES (%s, %s, %s::jsonb, %s::jsonb, %s)
+            ON CONFLICT (user_id)
+            DO UPDATE SET scene=EXCLUDED.scene,
+                          choices=EXCLUDED.choices,
+                          history=EXCLUDED.history,
+                          decisions_count=EXCLUDED.decisions_count,
+                          updated_at=now();
+        """, payload)
+        conn.commit()
 
-def delete_snapshot(user_id: str) -> None:
-    with _get_conn() as con:
-        with con.cursor() as cur:
-            cur.execute("DELETE FROM public.story_progress WHERE user_id = %s", (user_id,))
+def load_snapshot(user_id):
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT scene, choices, history, decisions_count
+            FROM public.story_progress
+            WHERE user_id=%s
+        """, (user_id,))
+        row = cur.fetchone()
+        if not row: return None
+        scene, choices, history, decisions_count = row
+        return {"scene": scene, "choices": choices, "history": history, "decisions_count": decisions_count}
 
-def has_snapshot(user_id: str) -> bool:
-    with _get_conn() as con:
-        with con.cursor() as cur:
-            cur.execute("SELECT 1 FROM public.story_progress WHERE user_id = %s LIMIT 1", (user_id,))
-            return cur.fetchone() is not None
+def delete_snapshot(user_id):
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM public.story_progress WHERE user_id=%s", (user_id,))
+        conn.commit()
+
+def has_snapshot(user_id) -> bool:
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM public.story_progress WHERE user_id=%s", (user_id,))
+        return cur.fetchone() is not None
+    
+def save_visit(user_id: str, scene: str, choice_text: str | None, choice_index: int | None):
+    """Append a visit row representing a screen the user has reached."""
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO public.story_visits(user_id, scene, choice_text, choice_index)
+            VALUES (%s, %s, %s, %s)
+        """, (user_id, scene, choice_text, choice_index))
+        conn.commit()
+

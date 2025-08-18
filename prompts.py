@@ -1,7 +1,5 @@
 from textwrap import dedent
 
-from textwrap import dedent
-
 # SYSTEM_PROMPT is formatted with .format(lore=...) in app.py
 SYSTEM_PROMPT = dedent("""
 You are the Narrative Engine for a dark-fantasy, PG-13 interactive story set in the world described by LORE.

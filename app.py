@@ -1,17 +1,18 @@
 # app.py
 from __future__ import annotations
-from typing import List
+from typing import List, Optional
 import streamlit as st
-from core.identity import ensure_browser_id, clear_browser_id_and_reload
-from data.store import init_db, load_snapshot, save_snapshot, delete_snapshot, has_snapshot
-from ui.controls import sidebar_controls, scene_and_choices
+from core.identity import ensure_browser_id
+from data.store import has_snapshot, delete_snapshot, load_snapshot, save_snapshot, save_visit
 import json
 from story.engine import stream_scene, generate_choices
-from ui.anim import inject_css, render_scene, render_thinking, render_choices
+from ui.anim import inject_css
 
-from ui.loader import lantern, show_lantern_loader
+from ui.loader import lantern
 from ui.streaming import stream_text
 from ui.choices import render_choices_grid
+
+from data.store import save_visit
 
 st.set_page_config(page_title="Gloamreach — Storyworld MVP", layout="wide")
 
@@ -88,15 +89,59 @@ def _dev_default() -> bool:
         val = (q.get("dev", [""]) or [""])[0]
     return _truthy(val)
 
-
-def start_new_story(pid: str):
-    # Defer the streaming to the next run so we don't render the old UI first
-    st.session_state["_start_new_pending"] = True
+def start_new_story():
+    """Kick the first deferred turn without touching browser_id."""
+    st.session_state["pending_choice"] = "__start__"
+    st.session_state["is_generating"] = True
     st.rerun()
 
-def apply_choice(pid: str, choice: str):
-    # Record the choice to process on the *next* run
-    st.session_state["_pending_choice"] = choice
+def continue_story():
+    """Resume by running the next turn if we already have state."""
+    st.session_state["pending_choice"] = "__start__"
+    st.session_state["is_generating"] = True
+    st.rerun()
+
+def reset_story():
+    """Hard reset: wipe persisted snapshot and local state (keeps browser_id)."""
+    pid = st.session_state.get("browser_id")
+    try:
+        if pid and has_snapshot(pid):
+            delete_snapshot(pid)
+    except Exception:
+        pass
+    for k in ("scene","choices","history","pending_choice","is_generating","choices_before"):
+        if k in st.session_state:
+            del st.session_state[k]
+    start_new_story()
+
+def sidebar_controls(pid: str) -> Optional[str]:
+    st.sidebar.markdown("### Story Controls")
+    # Show both buttons explicitly
+    new_clicked = st.sidebar.button("Start New Story", use_container_width=True)
+    cont_clicked = st.sidebar.button("Continue", type="primary", use_container_width=True)
+    reset_clicked = st.sidebar.button("Reset", type="secondary", use_container_width=True)
+
+    if new_clicked:
+        reset_story()          # guarantees fresh start, then reruns
+        return "start_new"
+    if cont_clicked:
+        continue_story()       # continues current slot, then reruns
+        return "continue"
+    if reset_clicked:
+        reset_story()          # wipes and starts, then reruns
+        return "reset"
+    return None
+
+# --- reliable choice grid (inline) -----------------------------------
+def _current_turn_id() -> int:
+    """0-based count of user decisions; used to keep button keys unique."""
+    hist = st.session_state.get("history", [])
+    return sum(1 for m in hist if isinstance(m, dict) and m.get("role") == "user")
+
+def apply_choice(choice_label: str) -> None:
+    """Set flags that the main loop expects, then rerun."""
+    st.session_state["pending_choice"] = choice_label
+    st.session_state["is_generating"] = True
     st.rerun()
 
 def _render_choices(choices: List[str], choices_ph):
@@ -116,6 +161,25 @@ def _render_choices(choices: List[str], choices_ph):
 CHOICE_COUNT = 2
 
 def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool):
+    # Ensure required state exists
+    st.session_state.setdefault("history", [])
+    st.session_state.setdefault("choices", [])
+    st.session_state.setdefault("scene", "")
+
+    # --- NEW: capture context from the *previous* turn (before we overwrite it)
+    old_choices = list(st.session_state.get("choices", []))
+    # Record the user's clicked choice as a user turn (for counting/keys/DB)
+    picked = st.session_state.get("pending_choice")
+    if picked and picked != "__start__":
+        hist = st.session_state["history"]
+        if not hist or hist[-1].get("role") != "user" or hist[-1].get("content") != picked:
+            hist.append({"role": "user", "content": picked})
+    if picked and picked != "__start__":
+        # log the player's selection as a 'user' turn (for LLM context and counting)
+        hist = st.session_state.get("history", [])
+        if not hist or hist[-1].get("role") != "user" or hist[-1].get("content") != picked:
+            st.session_state["history"].append({"role": "user", "content": picked})
+
     # keep grid visible during work
     render_choices_grid(grid_slot, choices=None, generating=True, count=CHOICE_COUNT)
 
@@ -133,7 +197,23 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool):
     # compute choices (fast), save, and render them
     choices = generate_choices(st.session_state["history"], full, LORE)
     st.session_state["choices"] = choices
+
+    # Persist main snapshot (decisions_count auto-computed in the backend)
     save_snapshot(pid, full, choices, st.session_state["history"])
+
+    # --- NEW: log this screen in story_visits with the choice that led here (if any)
+    choice_text = None
+    choice_index = None
+    if picked and picked != "__start__":
+        choice_text = str(picked)
+        try:
+            choice_index = int(old_choices.index(choice_text))  # 0-based
+        except Exception:
+            # Choice text didn't match the previous grid (rare/stale UI) — leave index as None
+            choice_index = None
+    save_visit(pid, full, choice_text, choice_index)
+
+    # render fresh buttons
     render_choices_grid(grid_slot, choices=choices, generating=False, count=CHOICE_COUNT)
 
 
@@ -184,19 +264,11 @@ def main():
     choices_ph = st.empty()
 
     # --- Deferred work FIRST (no duplicate text) ---
-    # 1) Starting a brand new story
-    if st.session_state.pop("_start_new_pending", False):
-        st.session_state["history"] = []
-        st.session_state["scene"] = None
-        st.session_state["choices"] = []
+    # If a start/choice is queued, run the turn now and clear the queue
+# --- Deferred work FIRST (no duplicate text) ---
+    if st.session_state.get("pending_choice") is not None:
         _advance_turn(pid, scene_ph, choices_ph, anim_enabled)
-        return  # prevent old UI from rendering under streamed scene
-
-    # 2) Applying a pending choice
-    pending = st.session_state.pop("_pending_choice", None)
-    if pending is not None:
-        st.session_state["history"].append({"role": "user", "content": pending})
-        _advance_turn(pid, scene_ph, choices_ph, anim_enabled)
+        st.session_state["pending_choice"] = None  # clear the queue for the next run
         return
 
     # --- Sidebar controls → actions ---
@@ -210,20 +282,21 @@ def main():
             st.session_state.pop(k, None)
         st.experimental_set_query_params()  # no-op on newer Streamlit; tidy on older
         st.rerun()
-        
+
     # --- Normal render (no pending work) ---
     if not st.session_state.get("scene"):
         st.info("Click **Start New Story** in the sidebar to begin.")
     else:
         scene_ph.markdown(st.session_state["scene"])
         turn_id = len(st.session_state.get("history", []))
-        render_choices(st.session_state.get("choices", []), choices_ph, turn_id)
+        from ui.choices import render_choices_grid  # (put at top with imports)
 
-    # --- Choice handler (after UI triggers) ---
-    picked = st.session_state.pop("_picked", None)
-    if picked:
-        apply_choice(pid, picked)
-        st.rerun()
+        render_choices_grid(
+            choices_ph,
+            choices=st.session_state.get("choices", []),
+            generating=False,
+            count=CHOICE_COUNT if "CHOICE_COUNT" in globals() else 2,
+        )
 
     # (No public debug/footer text; dev UI is gated above)
 

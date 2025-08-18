@@ -1,24 +1,31 @@
 # data/store.py
 from __future__ import annotations
-import os
-import importlib
-import logging
-
+import os, importlib, logging
 import streamlit as st
 
+# Prefer secrets, fall back to env
 _DB_URL = os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL")
-_STORE_NAME = "sqlite"  # default
+_STORE_NAME = "sqlite"
 
-# default to sqlite first
+# ---- Default to SQLite (and export save_visit)
 from data.sqlite_store import (  # type: ignore
     init_db as _init_db_sqlite,
     save_snapshot as _save_sqlite,
     load_snapshot as _load_sqlite,
     delete_snapshot as _delete_sqlite,
     has_snapshot as _has_sqlite,
+    save_visit as _save_visit_sqlite,
 )
 
-# attempt neon only if DATABASE_URL is present AND the module imports
+# Default assignments (SQLite)
+init_db = _init_db_sqlite
+save_snapshot = _save_sqlite
+load_snapshot = _load_sqlite
+delete_snapshot = _delete_sqlite
+has_snapshot = _has_sqlite
+save_visit = _save_visit_sqlite
+
+# ---- Prefer Neon if DATABASE_URL is present and module imports cleanly
 if _DB_URL:
     try:
         neon = importlib.import_module("data.neon_store")
@@ -27,23 +34,13 @@ if _DB_URL:
         load_snapshot = neon.load_snapshot
         delete_snapshot = neon.delete_snapshot
         has_snapshot = neon.has_snapshot
+        save_visit = neon.save_visit
         _STORE_NAME = "neon"
     except Exception as e:
         logging.warning(
             "DATABASE_URL is set but Neon backend not available (%s). Falling back to SQLite.",
             e,
         )
-        init_db = _init_db_sqlite
-        save_snapshot = _save_sqlite
-        load_snapshot = _load_sqlite
-        delete_snapshot = _delete_sqlite
-        has_snapshot = _has_sqlite
-else:
-    init_db = _init_db_sqlite
-    save_snapshot = _save_sqlite
-    load_snapshot = _load_sqlite
-    delete_snapshot = _delete_sqlite
-    has_snapshot = _has_sqlite
 
 def store_name() -> str:
     return _STORE_NAME
