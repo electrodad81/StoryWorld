@@ -98,21 +98,12 @@ def load_snapshot(user_id):
         if not row:
             return None
         scene, choices_s, history_s, decisions_count, username = row
-        try:
-            choices = json.loads(choices_s)
-        except Exception:
-            choices = []
-        try:
-            history = json.loads(history_s)
-        except Exception:
-            history = []
-        return {
-            "scene": scene,
-            "choices": choices,
-            "history": history,
-            "decisions_count": decisions_count,
-            "username": username,
-        }
+        try: choices = json.loads(choices_s)
+        except Exception: choices = []
+        try: history = json.loads(history_s)
+        except Exception: history = []
+        return {"scene": scene, "choices": choices, "history": history,
+                "decisions_count": decisions_count, "username": username}
 
 def delete_snapshot(user_id):
     with _connect() as conn:
