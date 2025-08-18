@@ -13,6 +13,15 @@ from utils.retry import retry_call
 SCENE_MODEL = os.getenv("SCENE_MODEL", "gpt-4o")
 CHOICE_MODEL = os.getenv("CHOICE_MODEL", "gpt-4o-mini")
 
+# Put this near your other constants
+PERSPECTIVE_RULES = (
+    "Narrate strictly in SECOND PERSON (address the player as 'you') and PRESENT TENSE.\n"
+    "Do NOT give the player a proper name, title, or gender unless explicitly provided in history "
+    "under keys like 'player_name' or 'player_identity'.\n"
+    "If earlier text mentions a name for the player, treat it as NPC dialogue; keep narration as 'you'.\n"
+    "Avoid third-person references to the player (no 'the hero', 'they', 'she/he' for the protagonist)."
+)
+
 @st.cache_resource(show_spinner=False)
 def _client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY")
@@ -44,12 +53,12 @@ def stream_scene(history: List[Dict[str,str]], lore: Dict) -> Generator[str, Non
     """
     Stream a narrative continuation given conversation history + lore.
     Yields text chunks (markdown). Use in Streamlit to update a container live.
-    """
+        """
     sys = (
-        "You are the narrative engine for a dark-fantasy, middle-school-readable "
-        "interactive storyworld called Gloamreach. Write vivid but PG-13 prose, "
-        "present tense, 120–180 words per beat. Avoid headings and meta-talk. "
-        "Never mention 'lore' explicitly."
+        "You are the narrative engine for a dark-fantasy, middle-school-readable interactive storyworld "
+        "called Gloamreach. Write vivid but PG-13 prose, present tense, 120–180 words per beat. "
+        "Avoid headings and meta-talk. Never mention 'lore' explicitly.\n\n"
+        f"{PERSPECTIVE_RULES}"
     )
     lore_blob = _lore_text(lore)
     user = (
@@ -111,7 +120,10 @@ def generate_choices(history: List[Dict[str,str]], last_scene: str, lore: Dict) 
     Uses retry/backoff for robustness, leaving streaming path unchanged.
     """
     sys = (
-        "You generate crisp, enticing choice labels for an interactive story. "
+        "You generate two crisp, enticing next-action choices for an interactive story.\n"
+        f"{PERSPECTIVE_RULES}\n"
+        "Each choice must read as what the PLAYER does (second person), ideally starting with a verb or 'You ...'. "
+        "No third-person names or pronouns for the player. "
         "Return ONLY a JSON array of two strings. Each <= 48 characters."
     )
     lore_blob = _lore_text(lore)
