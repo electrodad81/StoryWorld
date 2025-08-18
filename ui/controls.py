@@ -7,9 +7,6 @@ from typing import Optional, Literal
 Action = Optional[Literal["start", "reset"]]
 
 def sidebar_controls(pid: str) -> Action:
-    """Sidebar controls: Start New Story and Reset Session.
-    Returns an action string your main() handles.
-    """
     with st.sidebar:
         st.header("Story Controls")
         col1, col2 = st.columns(2)

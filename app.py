@@ -222,28 +222,43 @@ def main():
 
     # --- Atmosphere toggle (visible to everyone) ---
     with st.sidebar:
-        anim_enabled = st.checkbox("Atmosphere (lantern + typewriter)", value=False)
+        anim_enabled = st.checkbox("Atmosphere (lantern + typewriter)", value=True)
     if anim_enabled:
         inject_css()
 
     # --- Developer mode (hidden unless ?dev=1 or DEBUG_UI=true) ---
-    # initialize once per session
     if "_dev" not in st.session_state:
         try:
             st.session_state["_dev"] = _dev_default()  # helper you added earlier
         except NameError:
-            st.session_state["_dev"] = False  # safe fallback if helper not present
-    # allow turning dev UI off during the session
+            st.session_state["_dev"] = False
     with st.sidebar:
         if st.session_state["_dev"]:
             st.session_state["_dev"] = st.checkbox("Developer tools", value=True, help="Show debug info & self-tests")
     dev = bool(st.session_state["_dev"])
 
     # --- Identity & storage ---
-    from data.store import store_name, init_db, save_snapshot, load_snapshot, delete_snapshot
+    from data.store import init_db, save_snapshot, load_snapshot, delete_snapshot
     pid = ensure_browser_id()
     init_db()
     hydrate_once_for(pid)
+
+    # --- Always render sidebar controls up front ---
+    from ui.controls import sidebar_controls
+    action = sidebar_controls(pid)
+    if action == "start":
+        # queue first turn and rerun
+        st.session_state.setdefault("history", [])
+        st.session_state.setdefault("choices", [])
+        st.session_state.setdefault("scene", "")
+        st.session_state["pending_choice"] = "__start__"
+        st.session_state["is_generating"] = True
+        st.rerun()
+    elif action == "reset":
+        # clear only in-memory; keep DB unless you want to delete it
+        for k in ("scene", "choices", "history", "pending_choice", "is_generating", "choices_before"):
+            st.session_state.pop(k, None)
+        st.rerun()
 
     # --- Debug UI (only in dev mode) ---
     if dev:
@@ -263,34 +278,19 @@ def main():
     scene_ph   = st.empty()
     choices_ph = st.empty()
 
-    # --- Deferred work FIRST (no duplicate text) ---
-    # If a start/choice is queued, run the turn now and clear the queue
-# --- Deferred work FIRST (no duplicate text) ---
+    # --- Deferred work (no duplicate text) ---
     if st.session_state.get("pending_choice") is not None:
         _advance_turn(pid, scene_ph, choices_ph, anim_enabled)
         st.session_state["pending_choice"] = None  # clear the queue for the next run
         return
-
-    # --- Sidebar controls → actions ---
-    action = sidebar_controls(pid)
-    if action == "start":
-        start_new_story(pid)
-        st.rerun()
-    elif action == "reset":
-        # clear only in-memory (keep DB row)
-        for k in ("scene", "choices", "history"):
-            st.session_state.pop(k, None)
-        st.experimental_set_query_params()  # no-op on newer Streamlit; tidy on older
-        st.rerun()
 
     # --- Normal render (no pending work) ---
     if not st.session_state.get("scene"):
         st.info("Click **Start New Story** in the sidebar to begin.")
     else:
         scene_ph.markdown(st.session_state["scene"])
-        turn_id = len(st.session_state.get("history", []))
-        from ui.choices import render_choices_grid  # (put at top with imports)
-
+        # Use the shared renderer
+        from ui.choices import render_choices_grid
         render_choices_grid(
             choices_ph,
             choices=st.session_state.get("choices", []),
@@ -298,7 +298,6 @@ def main():
             count=CHOICE_COUNT if "CHOICE_COUNT" in globals() else 2,
         )
 
-    # (No public debug/footer text; dev UI is gated above)
 
 if __name__ == "__main__":
     main()
