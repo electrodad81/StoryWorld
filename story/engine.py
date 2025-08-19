@@ -64,14 +64,16 @@ def stream_scene(history: List[Dict[str,str]], lore: Dict) -> Generator[str, Non
         "You are the narrative engine for a dark-fantasy, middle-school-readable "
         "interactive storyworld called Gloamreach. Write vivid but PG-13 prose, "
         "present tense. Never mention 'lore' explicitly.\n"
-        "If a player username is provided, you may use it tastefully in NPC dialogue only "
-        "(e.g., “<name>, watch your step.”). Do NOT name the protagonist in narration; "
+        "If a player username is provided (non-empty), you may use that exact string in NPC dialogue only. "
+        "If no username is provided, do not invent one and do not use placeholders like <name>, {name}, or titles; "
+        "address the protagonist only as 'you'. Do NOT name the protagonist in narration; "
         "the POV remains second-person 'you'.\n\n"
         f"{PERSPECTIVE_RULES}\n"
         f"{CONCISION_RULES}\n"
         "Open with the on-screen consequence of the player’s last choice (one concrete, visible change).\n"
         "Small twist cadence: at most ~1 in 4 scenes, and only if twist_eligible=true.\n"
-        "Bonding cadence: include a brief affiliative exchange with an NPC if bonding_nudge is \"strong\" (and natural to the scene). Keep it subtle.\n"
+        "Bonding cadence: include a brief affiliative exchange with an NPC if bonding_nudge is \"strong\" "
+        "(and natural to the scene). Keep it subtle.\n"
         "Do not expose or mention control flags; they are guide rails for you only.\n"
     )
 
@@ -115,8 +117,13 @@ def stream_scene(history: List[Dict[str,str]], lore: Dict) -> Generator[str, Non
 
     # Optional player username (used ONLY in NPC dialogue, not narration)
     player_name = st.session_state.get("player_username") or ""
-    name_clause = f"Player username (for NPC dialogue only): {player_name}\n" if player_name else ""
+    if player_name:
+        name_clause = f"Player username (for NPC dialogue only): {player_name}\n"
+    else:
+        # Explicitly tell the model not to name the protagonist or use placeholders
+        name_clause = "No username is provided. Do not address the protagonist by any name or placeholder; use 'you' only.\n"
 
+    # Lore text (serialized JSON)
     lore_blob = _lore_text(lore)
     user = (
         name_clause +
@@ -139,18 +146,14 @@ def stream_scene(history: List[Dict[str,str]], lore: Dict) -> Generator[str, Non
         max_tokens=180,
         stream=True,
     )
-    try:
-        for chunk in stream:
-            if isinstance(chunk, ChatCompletionChunk):
-                delta = chunk.choices[0].delta.content
-                if delta:
-                    yield delta
-    finally:
-        try:
-            stream.close()
-        except Exception:
-            pass
-
+    for chunk in stream:
+        if isinstance(chunk, ChatCompletionChunk):
+            delta = chunk.choices[0].delta.content
+            if delta:
+                # If no username, remove any literal placeholder the model might still emit
+                if not player_name:
+                    delta = delta.replace("<name>", "").replace("  ", " ")
+                yield delta
 
 def _coerce_two_choices(text: str) -> List[str]:
     """
