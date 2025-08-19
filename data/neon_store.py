@@ -72,29 +72,29 @@ def init_db():
           ALTER TABLE public.story_progress
           ADD COLUMN IF NOT EXISTS decisions_count INTEGER NOT NULL DEFAULT 0;
         """)
+
         # Visit log table (every screen the user has seen)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS public.story_visits(
-          id            BIGSERIAL PRIMARY KEY,
-          user_id       TEXT NOT NULL,
-          visited_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-          scene         TEXT NOT NULL,
-          choice_text   TEXT,          -- choice that led to this scene (NULL on first scene)
-          choice_index  INTEGER        -- 0-based index of the chosen option (NULL on first scene)
+        id           BIGSERIAL PRIMARY KEY,
+        user_id      TEXT NOT NULL,
+        visited_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        scene        TEXT NOT NULL,
+        choice_text  TEXT,
+        choice_index INTEGER
         );
         """)
 
-        # Events table (track significant user actions)
+        # events table (you likely already have this)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS public.story_events(
-        id        BIGSERIAL PRIMARY KEY,
-        user_id   TEXT NOT NULL,
-        ts        TIMESTAMPTZ NOT NULL DEFAULT now(),
-        kind      TEXT NOT NULL,          -- 'start' | 'choice' | 'scene'
-        payload   JSONB                   -- arbitrary metrics blob
+        id      BIGSERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        ts      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        kind    TEXT NOT NULL,
+        payload JSONB
         );
         """)
-
 
         conn.commit()
 
@@ -162,11 +162,9 @@ def has_snapshot(user_id) -> bool:
         return cur.fetchone() is not None
     
 def save_visit(user_id: str, scene: str, choice_text: str | None, choice_index: int | None):
-    """Append a visit row representing a screen the user has reached."""
     with _connect() as conn, conn.cursor() as cur:
         cur.execute("""
             INSERT INTO public.story_visits(user_id, scene, choice_text, choice_index)
             VALUES (%s, %s, %s, %s)
         """, (user_id, scene, choice_text, choice_index))
         conn.commit()
-
