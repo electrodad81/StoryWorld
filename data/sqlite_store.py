@@ -64,6 +64,18 @@ def init_db():
           choice_index INTEGER
         );
         """)
+
+        # Events table (track significant user actions)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS story_events(
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        ts      TEXT NOT NULL DEFAULT (datetime('now')),
+        kind    TEXT NOT NULL,
+        payload TEXT
+        );
+        """)
+
         conn.commit()
 
 def _count_decisions(history_list) -> int:
@@ -72,6 +84,16 @@ def _count_decisions(history_list) -> int:
     except Exception:
         return 0
 
+# Save an event to the event log
+def save_event(user_id: str, kind: str, payload: dict | None = None):
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO story_events(user_id, kind, payload) VALUES (?, ?, ?)",
+            (user_id, kind, json.dumps(payload or {})),
+        )
+        conn.commit()
+
+# Snapshot the user's current state
 def save_snapshot(user_id, scene, choices, history, username=None):
     decisions_count = _count_decisions(history)
     with _connect() as conn:

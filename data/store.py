@@ -24,6 +24,8 @@ load_snapshot = _load_sqlite
 delete_snapshot = _delete_sqlite
 has_snapshot = _has_sqlite
 save_visit = _save_visit_sqlite
+from data.sqlite_store import save_event as _save_event_sqlite
+save_event = _save_event_sqlite
 
 # ---- Prefer Neon if DATABASE_URL is present and module imports cleanly
 if _DB_URL:
@@ -35,6 +37,7 @@ if _DB_URL:
         delete_snapshot = neon.delete_snapshot
         has_snapshot = neon.has_snapshot
         save_visit = neon.save_visit
+        save_event = neon.save_event
         _STORE_NAME = "neon"
     except Exception as e:
         logging.warning(

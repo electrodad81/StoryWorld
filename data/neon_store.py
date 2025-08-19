@@ -83,6 +83,19 @@ def init_db():
           choice_index  INTEGER        -- 0-based index of the chosen option (NULL on first scene)
         );
         """)
+
+        # Events table (track significant user actions)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS public.story_events(
+        id        BIGSERIAL PRIMARY KEY,
+        user_id   TEXT NOT NULL,
+        ts        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        kind      TEXT NOT NULL,          -- 'start' | 'choice' | 'scene'
+        payload   JSONB                   -- arbitrary metrics blob
+        );
+        """)
+
+
         conn.commit()
 
 def _count_decisions(history) -> int:
@@ -91,6 +104,16 @@ def _count_decisions(history) -> int:
     except Exception:
         return 0
 
+# Save an event to the event log
+def save_event(user_id: str, kind: str, payload: dict | None = None):
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO public.story_events(user_id, kind, payload) VALUES (%s, %s, %s::jsonb)",
+            (user_id, kind, json.dumps(payload or {})),
+        )
+        conn.commit()
+
+# Snapshot the user's current state
 def save_snapshot(user_id, scene, choices, history, username=None):
     """Upsert the user's latest state, maintain decisions_count, and (optionally) store username."""
     decisions_count = _count_decisions(history)
@@ -127,6 +150,7 @@ def load_snapshot(user_id):
             "decisions_count": decisions_count,
             "username": username,
         }
+    
 def delete_snapshot(user_id):
     with _connect() as conn, conn.cursor() as cur:
         cur.execute("DELETE FROM public.story_progress WHERE user_id=%s", (user_id,))

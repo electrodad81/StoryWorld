@@ -14,6 +14,9 @@ from ui.choices import render_choices_grid
 
 from data.store import save_visit
 
+import time
+from data.store import save_event  # after you export it
+
 st.set_page_config(page_title="Gloamreach — Storyworld MVP", layout="wide")
 
 # Load lore.json once
@@ -170,60 +173,74 @@ def _render_choices(choices: List[str], choices_ph):
 CHOICE_COUNT = 2
 
 def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool):
-    from data.store import save_snapshot, save_visit
-    # Ensure required state exists
+    from data.store import save_snapshot, save_visit, save_event
     st.session_state.setdefault("history", [])
     st.session_state.setdefault("choices", [])
     st.session_state.setdefault("scene", "")
 
-    # Capture prior choices (for choice_index) and the picked label
     old_choices = list(st.session_state.get("choices", []))
     picked = st.session_state.get("pending_choice")
 
-    # Record the player's selection as a 'user' turn (once)
+    # --- CHOICE EVENT + latency (time from choices visible → click)
     if picked and picked != "__start__":
         hist = st.session_state["history"]
         if not hist or hist[-1].get("role") != "user" or hist[-1].get("content") != picked:
             hist.append({"role": "user", "content": picked})
 
-    # Keep grid visible during work
+        visible_at = st.session_state.get("t_choices_visible_at")
+        latency_ms = int((time.time() - visible_at) * 1000) if visible_at else None
+        save_event(pid, "choice", {
+            "label": picked,
+            "index": (old_choices.index(picked) if picked in old_choices else None),
+            "latency_ms": latency_ms,
+            "decisions_count": sum(1 for m in hist if m.get("role") == "user"),
+        })
+
+    # keep grid visible during work
     render_choices_grid(grid_slot, choices=None, generating=True, count=CHOICE_COUNT)
 
-    # Stream the next scene (lantern + caret if enabled)
+    # --- mark scene stream start (dwell timer)
+    st.session_state["t_scene_start"] = time.time()
+
+    # stream scene
     if anim_enabled:
         with lantern("Summoning the next scene…"):
-            full = stream_text(stream_scene(st.session_state["history"], LORE),
-                               story_slot, show_caret=True)
+            full = stream_text(stream_scene(st.session_state["history"], LORE), story_slot, show_caret=True)
     else:
-        full = stream_text(stream_scene(st.session_state["history"], LORE),
-                           story_slot, show_caret=False)
+        full = stream_text(stream_scene(st.session_state["history"], LORE), story_slot, show_caret=False)
 
-    # Save to history
+    # finalize history
     st.session_state["history"].append({"role": "assistant", "content": full})
     st.session_state["scene"] = full
 
-    # Compute choices (fast) and stash
+    # choices next
     choices = generate_choices(st.session_state["history"], full, LORE)
     st.session_state["choices"] = choices
 
-    # Persist snapshot (decisions_count auto-computed) — pass USERNAME here
+    # persist snapshot (with username)
     username = st.session_state.get("player_username") or None
     save_snapshot(pid, full, choices, st.session_state["history"], username=username)
 
-    # Log this screen in story_visits with the choice that led here (if any)
+    # visit row
     choice_text, choice_index = None, None
     if picked and picked != "__start__":
         choice_text = str(picked)
         try:
-            choice_index = int(old_choices.index(choice_text))  # 0-based
+            choice_index = int(old_choices.index(choice_text))
         except Exception:
             choice_index = None
     save_visit(pid, full, choice_text, choice_index)
 
-    # Render fresh buttons
+    # --- SCENE EVENT: word count + dwell (time on scene until next click will be measured on the next run)
+    word_count = len(full.split())
+    save_event(pid, "scene", {
+        "word_count": word_count,
+        "has_choice": bool(choices),
+        "choices_count": len(choices or []),
+    })
+
+    # render fresh buttons
     render_choices_grid(grid_slot, choices=choices, generating=False, count=CHOICE_COUNT)
-
-
 
 def main():
     st.title("Gloamreach — Storyworld MVP")
@@ -262,6 +279,9 @@ def main():
         for k in ("scene", "choices", "history", "pending_choice", "is_generating", "choices_before"):
             st.session_state.pop(k, None)
         st.session_state["pending_choice"] = "__start__"   # queue first turn
+        save_event(pid, "start", {
+            "username": st.session_state.get("player_username") or None,
+        })
         st.session_state["is_generating"] = True
         st.rerun()
 
@@ -317,7 +337,11 @@ def main():
         st.info("Click **Start New Story** in the sidebar to begin.")
     else:
         scene_ph.markdown(st.session_state["scene"])
+        # Timestamp: choices are about to be visible
+        st.session_state["t_choices_visible_at"] = time.time()
+
         from ui.choices import render_choices_grid
+
         render_choices_grid(
             choices_ph,
             choices=st.session_state.get("choices", []),

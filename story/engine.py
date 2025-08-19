@@ -68,8 +68,50 @@ def stream_scene(history: List[Dict[str,str]], lore: Dict) -> Generator[str, Non
         "(e.g., “<name>, watch your step.”). Do NOT name the protagonist in narration; "
         "the POV remains second-person 'you'.\n\n"
         f"{PERSPECTIVE_RULES}\n"
-        f"{CONCISION_RULES}"
+        f"{CONCISION_RULES}\n"
+        "Open with the on-screen consequence of the player’s last choice (one concrete, visible change).\n"
+        "Small twist cadence: at most ~1 in 4 scenes, and only if twist_eligible=true.\n"
+        "Bonding cadence: include a brief affiliative exchange with an NPC if bonding_nudge is \"strong\" (and natural to the scene). Keep it subtle.\n"
+        "Do not expose or mention control flags; they are guide rails for you only.\n"
     )
+
+    # ---------- CONTROL FLAGS (computed, soft heuristics) ----------
+    # Beat index = how many assistant scenes already exist
+    beat_index = sum(1 for m in history if isinstance(m, dict) and m.get("role") == "assistant")
+
+    # last_choice = most recent 'user' message content (empty on first beat)
+    last_choice = ""
+    for m in reversed(history):
+        if isinstance(m, dict) and m.get("role") == "user":
+            last_choice = str(m.get("content") or "").strip()
+            break
+
+    # Twist cadence: invite at most ~1 in 4 beats, never two invites back-to-back
+    last_twist_invite_at = st.session_state.get("last_twist_invite_at", None)
+    twist_invited_last = (last_twist_invite_at == (beat_index - 1))
+    twist_eligible = (beat_index % 4 == 0) and not twist_invited_last
+    if twist_eligible:
+        st.session_state["last_twist_invite_at"] = beat_index
+
+    # Bonding cadence: escalate nudge over time since last "strong" nudge
+    last_bonding_strong_at = st.session_state.get("last_bonding_strong_at", -10_000)
+    beats_since_bonding = beat_index - last_bonding_strong_at
+    if beats_since_bonding >= 8:
+        bonding_nudge = "strong"
+        st.session_state["last_bonding_strong_at"] = beat_index  # mark that we nudged strongly this beat
+    elif beats_since_bonding >= 5:
+        bonding_nudge = "soft"
+    else:
+        bonding_nudge = "none"
+
+    control_flags = (
+        "--- CONTROL FLAGS ---\n"
+        f"twist_eligible: {str(twist_eligible).lower()}\n"   # 'true' | 'false'
+        f"bonding_nudge: {bonding_nudge}\n"                 # none | soft | strong
+        f"last_choice: {last_choice}\n"                     # empty on first beat
+        "--- END CONTROL FLAGS ---\n"
+    )
+    # ---------------------------------------------------------------
 
     # Optional player username (used ONLY in NPC dialogue, not narration)
     player_name = st.session_state.get("player_username") or ""
@@ -78,6 +120,7 @@ def stream_scene(history: List[Dict[str,str]], lore: Dict) -> Generator[str, Non
     lore_blob = _lore_text(lore)
     user = (
         name_clause +
+        control_flags +
         "Continue the story by one beat. Consider the world details below.\n"
         f"--- LORE JSON ---\n{lore_blob}\n--- END LORE ---\n\n"
         "Player history (latest last):\n"
@@ -91,9 +134,9 @@ def stream_scene(history: List[Dict[str,str]], lore: Dict) -> Generator[str, Non
         model=SCENE_MODEL,
         messages=[{"role":"system","content": sys},
                   {"role":"user","content": user}],
-        temperature=0.8,   # a touch lower helps concision
+        temperature=0.8,
         top_p=0.9,
-        max_tokens=180,    # ~120 words cap to avoid rambling
+        max_tokens=180,
         stream=True,
     )
     try:
@@ -107,6 +150,7 @@ def stream_scene(history: List[Dict[str,str]], lore: Dict) -> Generator[str, Non
             stream.close()
         except Exception:
             pass
+
 
 def _coerce_two_choices(text: str) -> List[str]:
     """
@@ -167,14 +211,53 @@ def generate_choices(history, last_scene, LORE) -> List[str]:
     """
     Fast non-stream call that returns exactly TWO short imperative choice labels (<= 48 chars each).
     """
+    # ----- CONTROL FLAGS (read-only; same cadence as stream_scene) -----
+    # Beat index = how many assistant scenes already exist
+    beat_index = sum(1 for m in history if isinstance(m, dict) and m.get("role") == "assistant")
+
+    # last_choice = most recent 'user' message content (empty on first beat)
+    last_choice = ""
+    for m in reversed(history):
+        if isinstance(m, dict) and m.get("role") == "user":
+            last_choice = str(m.get("content") or "").strip()
+            break
+
+    # Twist cadence: invite at most ~1 in 4 beats, never two invites back-to-back
+    last_twist_invite_at = st.session_state.get("last_twist_invite_at", None)
+    twist_invited_last = (last_twist_invite_at == (beat_index - 1))
+    twist_eligible = (beat_index % 4 == 0) and not twist_invited_last
+
+    # Bonding cadence (do not mutate counters here; stream_scene already does)
+    last_bonding_strong_at = st.session_state.get("last_bonding_strong_at", -10_000)
+    beats_since_bonding = beat_index - last_bonding_strong_at
+    if beats_since_bonding >= 8:
+        bonding_nudge = "strong"
+    elif beats_since_bonding >= 5:
+        bonding_nudge = "soft"
+    else:
+        bonding_nudge = "none"
+
+    control_flags = (
+        "--- CONTROL FLAGS ---\n"
+        f"twist_eligible: {str(twist_eligible).lower()}\n"  # 'true' | 'false'
+        f"bonding_nudge: {bonding_nudge}\n"                # none | soft | strong
+        f"last_choice: {last_choice}\n"                    # empty on first beat
+        "--- END CONTROL FLAGS ---\n"
+    )
+    # ------------------------------------------------------------------
+
     sys = (
         "You generate concise, imperative next-action options for an interactive story.\n"
         "Return ONLY a JSON array of two strings.\n"
         "Constraints: imperative voice (command form), do NOT start with 'You', ≤ 48 characters each, "
-        "no trailing periods, options must be meaningfully different."
+        "no trailing periods, options must be meaningfully different by approach and risk.\n"
+        "If bonding_nudge is \"strong\", let one option be prosocial (dialogue, help, trust) if it fits.\n"
+        "Do not expose or mention control flags to the player."
     )
+
     lore_blob = _lore_text(LORE)
     user = (
+        control_flags +
         "Based on the latest scene, propose two distinct next actions the player can take.\n"
         "Write each as a short IMPERATIVE label (e.g., 'Follow the wisp', 'Search the archway'). "
         "Do NOT begin with 'You'.\n"
@@ -188,8 +271,8 @@ def generate_choices(history, last_scene, LORE) -> List[str]:
     def _call():
         resp = cli.chat.completions.create(
             model=CHOICE_MODEL,
-            messages=[{"role":"system","content": sys},
-                      {"role":"user","content": user}],
+            messages=[{"role": "system", "content": sys},
+                      {"role": "user", "content": user}],
             temperature=0.7,
             max_tokens=80,  # enough for two short labels in JSON
         )
@@ -214,11 +297,19 @@ def generate_choices(history, last_scene, LORE) -> List[str]:
         if len(cleaned) < 2:
             fallbacks = ["Investigate further", "Retreat to safety"]
             for fb in fallbacks:
-                if len(cleaned) >= 2: break
+                if len(cleaned) >= 2:
+                    break
                 if fb.lower() not in seen:
                     cleaned.append(fb)
                     seen.add(fb.lower())
 
         return cleaned[:2]
+
+    # Use your existing retry helper if available
+    try:
+        return retry_call(_call, tries=3, base=0.6)
+    except NameError:
+        return _call()
+
 
     return retry_call(_call, tries=3, base=0.6)
