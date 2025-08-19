@@ -15,6 +15,7 @@ from data.sqlite_store import (  # type: ignore
     delete_snapshot as _delete_sqlite,
     has_snapshot as _has_sqlite,
     save_visit as _save_visit_sqlite,
+    save_event as _save_event_sqlite,
 )
 
 # Default assignments (SQLite)
@@ -26,6 +27,7 @@ has_snapshot = _has_sqlite
 save_visit = _save_visit_sqlite
 from data.sqlite_store import save_event as _save_event_sqlite
 save_event = _save_event_sqlite
+_STORE_NAME = "sqlite"
 
 # ---- Prefer Neon if DATABASE_URL is present and module imports cleanly
 if _DB_URL:
