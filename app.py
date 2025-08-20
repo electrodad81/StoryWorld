@@ -68,11 +68,12 @@ def hydrate_once_for(pid: str):
         st.session_state["scene"]   = snap.get("scene") or ""
         st.session_state["choices"] = snap.get("choices") or []
         st.session_state["history"] = snap.get("history") or []
+        st.session_state["player_gender"] = snap["gender"]
         # Only set username if the widget hasn't created the key this run
-        if snap.get("username") and "player_username" not in st.session_state:
-            st.session_state["player_username"] = snap["username"]
-        else:
-            st.session_state.setdefault("player_username", "")
+        if snap and snap.get("username"):
+            st.session_state["player_name"] = snap["username"]
+            st.session_state.setdefault("player_username", snap["username"])  # compat
+
     else:
         st.session_state["scene"] = ""
         st.session_state["choices"] = []
@@ -100,6 +101,20 @@ def _dev_default() -> bool:
         q = st.experimental_get_query_params()
         val = (q.get("dev", [""]) or [""])[0]
     return _truthy(val)
+
+def render_sidebar_username(story_started: bool):
+    with st.sidebar:
+        if story_started:
+            st.session_state.setdefault("player_username", "")
+            st.text_input(
+                "Player username (optional)",
+                key="player_username",
+                placeholder="e.g., Nova",
+                max_chars=24,
+                help="Used in NPC dialogue only. You can change this anytime."
+            )
+        else:
+            st.caption("Set your username on the start screen.")
 
 def start_new_story():
     """Kick the first deferred turn without touching browser_id."""
@@ -172,7 +187,7 @@ def _render_choices(choices: List[str], choices_ph):
 
 CHOICE_COUNT = 2
 
-def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool):
+def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool = True):
     from data.store import save_snapshot, save_visit, save_event
     st.session_state.setdefault("history", [])
     st.session_state.setdefault("choices", [])
@@ -217,9 +232,16 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool):
     choices = generate_choices(st.session_state["history"], full, LORE)
     st.session_state["choices"] = choices
 
-    # persist snapshot (with username)
-    username = st.session_state.get("player_username") or None
-    save_snapshot(pid, full, choices, st.session_state["history"], username=username)
+    # --- persist snapshot (username + gender/archetype if supported)
+    username  = st.session_state.get("player_name") or st.session_state.get("player_username") or None
+    gender    = st.session_state.get("player_gender")
+    archetype = st.session_state.get("player_archetype")
+    try:
+        save_snapshot(pid, full, choices, st.session_state["history"],
+                    username=username, gender=gender, archetype=archetype)
+    except TypeError:
+        save_snapshot(pid, full, choices, st.session_state["history"], username=username)
+
 
     # visit row
     choice_text, choice_index = None, None
@@ -231,7 +253,7 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool):
             choice_index = None
     save_visit(pid, full, choice_text, choice_index)
 
-    # --- SCENE EVENT: word count + dwell (time on scene until next click will be measured on the next run)
+    # --- SCENE EVENT: word count + dwell (time on scene until next click measured next run)
     word_count = len(full.split())
     save_event(pid, "scene", {
         "word_count": word_count,
@@ -242,16 +264,45 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool):
     # render fresh buttons
     render_choices_grid(grid_slot, choices=choices, generating=False, count=CHOICE_COUNT)
 
+
+def render_onboarding(pid: str):
+    st.header("Begin Your Journey")
+    st.markdown("Pick your setup. Name and character are locked once you begin.")
+
+    # Required Name
+    name = st.text_input("Name", key="onb_name", placeholder="e.g., Nova", max_chars=24)
+    gender = st.selectbox("Gender", ["Unspecified", "Female", "Male", "Nonbinary"], index=0, key="onb_gender")
+    archetype = st.selectbox("Character type", ["Default"], index=0, key="onb_archetype")
+
+    c1, c2 = st.columns([1, 1])
+    begin = c1.button("Begin Adventure", use_container_width=True, disabled=not name.strip())
+    reset  = c2.button("Reset Choices", use_container_width=True)
+
+    if begin:
+        # Lock selections for this session
+        st.session_state["player_name"] = name.strip()
+        st.session_state["player_username"] = st.session_state["player_name"]  # compat with existing code
+        st.session_state["player_gender"] = gender
+        st.session_state["player_archetype"] = archetype
+
+        # Queue first turn
+        st.session_state["pending_choice"] = "__start__"
+        st.session_state["is_generating"] = True
+        st.rerun()
+
+    if reset:
+        for k in ("onb_name", "onb_gender", "onb_archetype"):
+            st.session_state.pop(k, None)
+        st.rerun()
+
 def main():
     st.title("Gloamreach — Storyworld MVP")
 
-    # --- Atmosphere toggle (visible to everyone) ---
-    with st.sidebar:
-        anim_enabled = st.checkbox("Atmosphere (lantern + typewriter)", value=True)  # default ON if you like
-    if anim_enabled:
-        inject_css()
+    # --- Atmosphere: always ON, no checkbox ---
+    anim_enabled = True
+    inject_css()
 
-    # --- Developer mode (hidden unless ?dev=1 or DEBUG_UI=true) ---
+    # --- Developer mode ---
     if "_dev" not in st.session_state:
         try:
             st.session_state["_dev"] = _dev_default()
@@ -263,52 +314,78 @@ def main():
     dev = bool(st.session_state["_dev"])
 
     # --- Identity & storage ---
-    from data.store import init_db, save_snapshot, load_snapshot, delete_snapshot
+    from data.store import init_db, save_snapshot, load_snapshot, delete_snapshot, has_snapshot, save_event
     pid = ensure_browser_id()
     init_db()
 
-    # --- Always render sidebar controls up front (hard-reset semantics) ---
-    from ui.controls import sidebar_controls
-    action = sidebar_controls(pid)
-    if action == "start":
-        # Hard reset + immediately start fresh
-        try:
-            delete_snapshot(pid)      # wipe persisted progress
-        except Exception:
-            pass
-        for k in ("scene", "choices", "history", "pending_choice", "is_generating", "choices_before"):
-            st.session_state.pop(k, None)
-        st.session_state["pending_choice"] = "__start__"   # queue first turn
-        save_event(pid, "start", {
-            "username": st.session_state.get("player_username") or None,
-        })
-        st.session_state["is_generating"] = True
-        st.rerun()
+    # --- Fixed body slots ---
+    scene_ph   = st.empty()
+    choices_ph = st.empty()
 
-    elif action == "reset":
-        # Hard reset; do NOT auto-start
+    # --- Sidebar controls: render EARLY every run so they never vanish ---
+    try:
+        from ui.controls import sidebar_controls
+    except Exception:
+        from controls import sidebar_controls  # fallback if file lives at project root
+    action = sidebar_controls(pid)
+
+    if action == "start":
+        # Hard reset persisted + in-memory, then queue first turn
         try:
             delete_snapshot(pid)
         except Exception:
             pass
-        for k in ("scene", "choices", "history", "pending_choice", "is_generating", "choices_before"):
+        for k in ("scene", "choices", "history", "pending_choice", "is_generating",
+                  "choices_before", "t_choices_visible_at", "t_scene_start"):
+            st.session_state.pop(k, None)
+
+        st.session_state["pending_choice"] = "__start__"
+        st.session_state["is_generating"] = True
+        try:
+            save_event(pid, "start", {"username": st.session_state.get("player_username") or None})
+        except Exception:
+            pass
+        st.rerun()
+
+    elif action == "reset":
+        try:
+            delete_snapshot(pid)
+        except Exception:
+            pass
+        for k in (
+            "scene","choices","history","pending_choice","is_generating","choices_before",
+            "t_choices_visible_at","t_scene_start",
+            # also clear locked selections:
+            "player_name","player_username","player_gender","player_archetype"
+        ):
             st.session_state.pop(k, None)
         st.rerun()
 
-    # --- Hydrate AFTER handling actions so we don't revive old snapshots ---
+    # --- Hydrate AFTER handling actions ---
     hydrate_once_for(pid)
 
-    # now render the sidebar
-    with st.sidebar:
-        username = st.text_input(
-            "Player username (optional)",
-            key="player_username",          # don't pass `value=`; let session_state supply it
-            placeholder="e.g., Bastion",
-            max_chars=24,
-            help="Used in NPC dialogue only. You can change this anytime.",
-        )
+    # --- Pending work FIRST (no duplicate text) ---
+    # Buttons remain visible because we rendered them already above.
+    if st.session_state.get("pending_choice") is not None:
+        _advance_turn(pid, scene_ph, choices_ph, anim_enabled)
+        st.session_state["pending_choice"] = None
+        return
 
-    # --- Debug UI (only in dev mode) ---
+    # --- Onboarding for brand-new players (no scene and no snapshot) ---
+    brand_new = (not st.session_state.get("scene")) and (not has_snapshot(pid))
+    if brand_new:
+        render_onboarding(pid)
+        return  # prevents sidebar username from rendering this run
+
+    # --- Sidebar username (render exactly once, post-onboarding) ---
+    with st.sidebar:
+        # Show locked Name (no editing)
+        name_locked = st.session_state.get("player_name") or st.session_state.get("player_username") or ""
+        if name_locked:
+            st.caption("Name")
+            st.text_input("Name", value=name_locked, key="locked_name", disabled=True)
+
+    # --- Debug UI (dev only) ---
     if dev:
         import os, json
         db_url = os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL")
@@ -316,40 +393,27 @@ def main():
             pid_for_test = st.session_state.get("browser_id", "no-id")
             if st.button("Write probe row"):
                 init_db()
-                save_snapshot(pid_for_test, "PROBE_SCENE", ["A","B"], [{"role":"assistant","content":"probe"}])
+                save_snapshot(pid_for_test, "PROBE_SCENE", ["A", "B"], [{"role": "assistant", "content": "probe"}])
                 st.success("Wrote probe row")
             if st.button("Read probe row"):
                 snap = load_snapshot(pid_for_test)
                 st.code(json.dumps(snap, indent=2))
 
-    # --- Fixed slots for this run ---
-    scene_ph   = st.empty()
-    choices_ph = st.empty()
-
-    # --- Deferred work (no duplicate text) ---
-    if st.session_state.get("pending_choice") is not None:
-        _advance_turn(pid, scene_ph, choices_ph, anim_enabled)
-        st.session_state["pending_choice"] = None
-        return
-
-    # --- Normal render (no pending work) ---
+    # --- Normal render ---
     if not st.session_state.get("scene"):
         st.info("Click **Start New Story** in the sidebar to begin.")
     else:
         scene_ph.markdown(st.session_state["scene"])
-        # Timestamp: choices are about to be visible
+        # Choices are about to be visible (for latency calc on click)
         st.session_state["t_choices_visible_at"] = time.time()
 
         from ui.choices import render_choices_grid
-
         render_choices_grid(
             choices_ph,
             choices=st.session_state.get("choices", []),
             generating=False,
             count=CHOICE_COUNT if "CHOICE_COUNT" in globals() else 2,
         )
-
-
 
 if __name__ == "__main__":
     main()

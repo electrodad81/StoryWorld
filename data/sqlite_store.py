@@ -52,6 +52,10 @@ def init_db():
             conn.execute("ALTER TABLE story_progress ADD COLUMN decisions_count INTEGER NOT NULL DEFAULT 0;")
         if not _column_exists(conn, "story_progress", "username"):
             conn.execute("ALTER TABLE story_progress ADD COLUMN username TEXT;")
+        if not _column_exists(conn, "story_progress", "gender"):
+            conn.execute("ALTER TABLE story_progress ADD COLUMN gender TEXT;")
+        if not _column_exists(conn, "story_progress", "archetype"):
+            conn.execute("ALTER TABLE story_progress ADD COLUMN archetype TEXT;")
 
         # Visit log table
         conn.execute("""
@@ -94,38 +98,53 @@ def save_event(user_id: str, kind: str, payload: dict | None = None):
         conn.commit()
 
 # Snapshot the user's current state
-def save_snapshot(user_id, scene, choices, history, username=None):
+def save_snapshot(user_id, scene, choices, history, username=None, gender=None, archetype=None):
     decisions_count = _count_decisions(history)
     with _connect() as conn:
         conn.execute("""
-        INSERT INTO story_progress(user_id, scene, choices, history, decisions_count, updated_at, username)
-        VALUES (?, ?, ?, ?, ?, datetime('now'), ?)
+        INSERT INTO story_progress(user_id, scene, choices, history, decisions_count, updated_at, username, gender, archetype)
+        VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
             scene=excluded.scene,
             choices=excluded.choices,
             history=excluded.history,
             decisions_count=excluded.decisions_count,
             username=COALESCE(excluded.username, story_progress.username),
+            gender=COALESCE(excluded.gender, story_progress.gender),
+            archetype=COALESCE(excluded.archetype, story_progress.archetype),
             updated_at=excluded.updated_at
-        """, (user_id, scene, json.dumps(choices), json.dumps(history), decisions_count, username))
+        """, (user_id, scene, json.dumps(choices), json.dumps(history),
+              decisions_count, username, gender, archetype))
         conn.commit()
 
+# --- update load_snapshot to return the new fields ---
 def load_snapshot(user_id):
     with _connect() as conn:
-        cur = conn.execute(
-            "SELECT scene, choices, history, decisions_count, username FROM story_progress WHERE user_id=?",
-            (user_id,)
-        )
+        cur = conn.execute("""
+            SELECT scene, choices, history, decisions_count, username, gender, archetype
+            FROM story_progress WHERE user_id=?""", (user_id,))
         row = cur.fetchone()
         if not row:
             return None
-        scene, choices_s, history_s, decisions_count, username = row
-        try: choices = json.loads(choices_s)
-        except Exception: choices = []
-        try: history = json.loads(history_s)
-        except Exception: history = []
-        return {"scene": scene, "choices": choices, "history": history,
-                "decisions_count": decisions_count, "username": username}
+        scene, choices_s, history_s, decisions_count, username, gender, archetype = row
+        try:
+            choices = json.loads(choices_s)
+        except Exception:
+            choices = []
+        try:
+            history = json.loads(history_s)
+        except Exception:
+            history = []
+        return {
+            "scene": scene,
+            "choices": choices,
+            "history": history,
+            "decisions_count": decisions_count,
+            "username": username,
+            "gender": gender,
+            "archetype": archetype,
+        }
+
 
 def delete_snapshot(user_id):
     with _connect() as conn:

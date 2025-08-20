@@ -115,13 +115,12 @@ def stream_scene(history: List[Dict[str,str]], lore: Dict) -> Generator[str, Non
     )
     # ---------------------------------------------------------------
 
-    # Optional player username (used ONLY in NPC dialogue, not narration)
-    player_name = st.session_state.get("player_username") or ""
+    player_name = st.session_state.get("player_name") or st.session_state.get("player_username") or ""
     if player_name:
-        name_clause = f"Player username (for NPC dialogue only): {player_name}\n"
+        name_clause = f"Player name (for NPC dialogue only): {player_name}\n"
     else:
-        # Explicitly tell the model not to name the protagonist or use placeholders
-        name_clause = "No username is provided. Do not address the protagonist by any name or placeholder; use 'you' only.\n"
+        # Safety (shouldn’t happen now, but keeps things robust)
+        name_clause = "No name is provided. Do not address the protagonist by any name; use 'you' only.\n"
 
     # Lore text (serialized JSON)
     lore_blob = _lore_text(lore)
