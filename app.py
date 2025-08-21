@@ -403,10 +403,9 @@ def main():
     if not st.session_state.get("scene"):
         st.info("Click **Start New Story** in the sidebar to begin.")
     else:
-        scene_ph.markdown(st.session_state["scene"])
-        # Choices are about to be visible (for latency calc on click)
-        st.session_state["t_choices_visible_at"] = time.time()
-
+        # Constrain the width of the story text and center it
+        scene_html = f"<div style='max-width: 700px; margin-left: auto; margin-right: auto;'>{st.session_state['scene']}</div>"
+        scene_ph.markdown(scene_html, unsafe_allow_html=True)
         from ui.choices import render_choices_grid
         render_choices_grid(
             choices_ph,
@@ -414,6 +413,6 @@ def main():
             generating=False,
             count=CHOICE_COUNT if "CHOICE_COUNT" in globals() else 2,
         )
-
+    
 if __name__ == "__main__":
     main()
