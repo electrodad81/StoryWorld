@@ -8,7 +8,10 @@ import json
 from story.engine import stream_scene, generate_choices
 from ui.anim import inject_css
 
+import re  # for risk keyword matching
+
 from ui.loader import lantern
+from ui.anim import render_thinking
 from ui.streaming import stream_text
 from ui.choices import render_choices_grid
 
@@ -29,7 +32,110 @@ INTRO_SCENE = (
 )
 INTRO_CHOICES = ["Follow the creaking rope.", "Explore a shadowed alley."]
 
+# -----------------------------------------------------------------------------
+# Risk & Consequence utilities (name-agnostic)
+# -----------------------------------------------------------------------------
+# A set of keywords that indicate a risky choice. Feel free to tweak/extend
+# these terms to better fit your storyworld. The words are matched
+# case-insensitively as whole words using regular expressions.
+_RISKY_WORDS: set[str] = {
+    "charge", "attack", "fight", "steal", "stab", "break", "smash", "dive",
+    "jump", "descend", "enter", "drink", "touch", "open the", "confront",
+    "cross", "swim", "sprint", "bait", "ambush", "bleed", "sacrifice", "shout",
+    "brave", "risk", "gamble", "rush", "kick", "force", "pry", "ignite", "set fire"
+}
+
+def is_risky_label(label: str) -> bool:
+    """Return True if the given choice label contains any risky keywords."""
+    s = (label or "").lower()
+    return any(re.search(rf"\b{re.escape(w)}\b", s) for w in _RISKY_WORDS)
+
+def update_consequence_counters(picked_label: Optional[str]) -> None:
+    """
+    Update the in-session counters that track consecutive risky choices.
+    On a risky pick, increment ``danger_streak``. On a safe pick, decrement the streak
+    (never below zero). These counters live only in session state and are not
+    persisted to the database. A ``picked_label`` of ``None`` or ``"__start__"``
+    is ignored.
+    """
+    if not picked_label or picked_label == "__start__":
+        return
+    if is_risky_label(picked_label):
+        st.session_state["danger_streak"] = st.session_state.get("danger_streak", 0) + 1
+    else:
+        # Safe picks reduce the streak (but not below zero)
+        st.session_state["danger_streak"] = max(0, st.session_state.get("danger_streak", 0) - 1)
+
+def detect_cost_in_scene(text: str) -> bool:
+    """
+    Heuristic check to see if the scene text contains a visible cost or setback.
+    Looks for a variety of words related to injury, loss, time pressure, or being
+    trapped. Returns True if any cost indicator is present.
+    """
+    cost_terms = [
+        "bleed", "wound", "cut", "bruis", "sprain", "fracture", "poison",
+        "lose", "lost", "dropped", "broke", "shattered", "torn", "spent",
+        "captured", "seized", "trapped", "cornered", "exposed", "compromised",
+        "too late", "ticking", "deadline", "out of time", "cannot return",
+        "ally leaves", "ally falls", "alone now", "weakened", "limp"
+    ]
+    t = (text or "").lower()
+    return any(w in t for w in cost_terms)
+
+def render_death_options(pid: str, slot) -> None:
+    """
+    Render the death fail-state options panel. This appears only when a scene
+    ends with the special ``[DEATH]`` tag. Offers the player two buttons:
+    'Restart this story' (continuing with the same Name/Gender/Character) and
+    'Start a new story' (fresh run). Both options clear session state and
+    persisted snapshot before queuing a new '__start__' turn.
+    """
+    with slot.container():
+        st.subheader("Your journey ends here.")
+        st.caption("Fate is not always kind in Gloamreach.")
+        c1, c2 = st.columns(2)
+        restart = c1.button("Restart this story", use_container_width=True, key="death_restart")
+        anew    = c2.button("Start a new story", use_container_width=True, key="death_new")
+        if restart or anew:
+            # Log the player's choice (restart vs new)
+            try:
+                save_event(pid, "death_choice", {"action": "restart" if restart else "new"})
+            except Exception:
+                pass
+            # Clear the current run but keep locked selections (Name/Gender/Character)
+            for k in (
+                "scene", "choices", "history", "pending_choice", "is_generating",
+                "choices_before", "t_choices_visible_at", "t_scene_start", "is_dead"
+            ):
+                st.session_state.pop(k, None)
+            try:
+                delete_snapshot(pid)
+            except Exception:
+                pass
+            st.session_state["pending_choice"] = "__start__"
+            st.session_state["is_generating"] = True
+            st.rerun()
+
 def inject_css():
+    """Inject global and local CSS styles.
+
+    This function first invokes the shared CSS injector from ``ui.anim`` to
+    ensure all base styles (including both ``.bulb`` and ``.flame`` classes)
+    are available. It then overlays any local customizations specific to
+    the top-level app, such as the radial gradient flame and caret styling.
+    """
+    # Import here to avoid circular import at module load time. Using the
+    # module-level ``inject_css`` from ``ui.anim`` ensures our local
+    # definition does not override the shared injector.
+    try:
+        from ui import anim as _anim
+        # Call the shared injector; guarded to prevent infinite recursion.
+        _anim.inject_css(enabled=True)
+    except Exception:
+        # Fallback: if import fails, continue silently. This may happen in
+        # certain testing contexts but should not prevent the app from
+        # rendering.
+        pass
     st.markdown("""
 <style>
 /* Lantern flicker */
@@ -196,6 +302,14 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool = True):
     old_choices = list(st.session_state.get("choices", []))
     picked = st.session_state.get("pending_choice")
 
+    # Update risk counters for this pick (increments on risky, decrements on safe)
+    # Do this before logging the choice event so that danger_streak reflects the
+    # current pick in telemetry.
+    try:
+        update_consequence_counters(picked)
+    except Exception:
+        pass
+
     # --- CHOICE EVENT + latency (time from choices visible → click)
     if picked and picked != "__start__":
         hist = st.session_state["history"]
@@ -204,29 +318,82 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool = True):
 
         visible_at = st.session_state.get("t_choices_visible_at")
         latency_ms = int((time.time() - visible_at) * 1000) if visible_at else None
+        # Include danger_streak in choice telemetry
         save_event(pid, "choice", {
             "label": picked,
             "index": (old_choices.index(picked) if picked in old_choices else None),
             "latency_ms": latency_ms,
             "decisions_count": sum(1 for m in hist if m.get("role") == "user"),
+            "danger_streak": st.session_state.get("danger_streak", 0),
         })
 
-    # keep grid visible during work
-    render_choices_grid(grid_slot, choices=None, generating=True, count=CHOICE_COUNT)
+    # show the lantern loader in place of the choices while we generate the next scene
+    # using ui.anim.render_thinking to ensure the glow appears in the same slot
+    try:
+        # this writes the lantern into the choices area; it will be overwritten when buttons render
+        render_thinking(grid_slot)
+    except Exception:
+        # if the import fails, fall back to neutral placeholders (no buttons)
+        render_choices_grid(grid_slot, choices=None, generating=True, count=CHOICE_COUNT)
 
     # --- mark scene stream start (dwell timer)
     st.session_state["t_scene_start"] = time.time()
 
     # stream scene
     if anim_enabled:
-        with lantern("Summoning the next scene…"):
-            full = stream_text(stream_scene(st.session_state["history"], LORE), story_slot, show_caret=True)
+        # no need to use the loader context here since the lantern is shown in the grid slot
+        full = stream_text(stream_scene(st.session_state["history"], LORE), story_slot, show_caret=True)
     else:
         full = stream_text(stream_scene(st.session_state["history"], LORE), story_slot, show_caret=False)
+
+    # DEATH sentinel detection: model will append [DEATH] on a fatal scene
+    died = False
+    stripped = full.rstrip()
+    if stripped.endswith("[DEATH]"):
+        died = True
+        full = stripped[: -len("[DEATH]")].rstrip()
 
     # finalize history
     st.session_state["history"].append({"role": "assistant", "content": full})
     st.session_state["scene"] = full
+
+    # Evaluate expected cost: if pick was risky or must_escalate (danger streak ≥ 2)
+    must_escalate = st.session_state.get("danger_streak", 0) >= 2
+    expected_cost = (
+        bool(picked and picked != "__start__" and is_risky_label(picked)) or must_escalate
+    )
+    # If we expected a cost but none found and not dead, log a miss
+    if expected_cost and not died and not detect_cost_in_scene(full):
+        try:
+            save_event(pid, "missed_consequence", {
+                "picked": picked,
+                "danger_streak": st.session_state.get("danger_streak", 0),
+            })
+        except Exception:
+            pass
+
+    # If dead: mark state, log death, persist with no choices, show death panel, and exit
+    if died:
+        st.session_state["is_dead"] = True
+        try:
+            save_event(pid, "death", {
+                "picked": picked,
+                "decisions_count": sum(1 for m in st.session_state["history"] if m.get("role") == "user"),
+                "danger_streak": st.session_state.get("danger_streak", 0),
+            })
+        except Exception:
+            pass
+        # Persist snapshot with no choices (terminal scene)
+        username  = st.session_state.get("player_name") or st.session_state.get("player_username") or None
+        gender    = st.session_state.get("player_gender")
+        archetype = st.session_state.get("player_archetype")
+        try:
+            save_snapshot(pid, full, [], st.session_state["history"], username=username, gender=gender, archetype=archetype)
+        except TypeError:
+            save_snapshot(pid, full, [], st.session_state["history"], username=username)
+        # Show the death options panel and halt
+        render_death_options(pid, grid_slot)
+        return
 
     # choices next
     choices = generate_choices(st.session_state["history"], full, LORE)
@@ -238,10 +405,9 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool = True):
     archetype = st.session_state.get("player_archetype")
     try:
         save_snapshot(pid, full, choices, st.session_state["history"],
-                    username=username, gender=gender, archetype=archetype)
+                      username=username, gender=gender, archetype=archetype)
     except TypeError:
         save_snapshot(pid, full, choices, st.session_state["history"], username=username)
-
 
     # visit row
     choice_text, choice_index = None, None
@@ -259,6 +425,7 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool = True):
         "word_count": word_count,
         "has_choice": bool(choices),
         "choices_count": len(choices or []),
+        "danger_streak": st.session_state.get("danger_streak", 0),
     })
 
     # render fresh buttons
@@ -403,9 +570,10 @@ def main():
     if not st.session_state.get("scene"):
         st.info("Click **Start New Story** in the sidebar to begin.")
     else:
-        # Constrain the width of the story text and center it
-        scene_html = f"<div style='max-width: 700px; margin-left: auto; margin-right: auto;'>{st.session_state['scene']}</div>"
-        scene_ph.markdown(scene_html, unsafe_allow_html=True)
+        scene_ph.markdown(st.session_state["scene"])
+        # Choices are about to be visible (for latency calc on click)
+        st.session_state["t_choices_visible_at"] = time.time()
+
         from ui.choices import render_choices_grid
         render_choices_grid(
             choices_ph,
@@ -413,6 +581,6 @@ def main():
             generating=False,
             count=CHOICE_COUNT if "CHOICE_COUNT" in globals() else 2,
         )
-    
+
 if __name__ == "__main__":
     main()

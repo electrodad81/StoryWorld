@@ -37,9 +37,18 @@ def render_choices_grid(
         tid = _turn_id()
         for i, label in enumerate(choices[:count]):
             key = f"choice_{tid}_{i}"
-            if cols[i % len(cols)].button(label, key=key, use_container_width=True):
+            col = cols[i % len(cols)]
+            if col.button(label, key=key, use_container_width=True):
                 # Defer the turn to the main loop
                 st.session_state["pending_choice"] = label
                 st.session_state["is_generating"] = True
                 st.rerun()
+            # Optional: annotate risky choices with a visual hint below the button
+            try:
+                from app import is_risky_label as _is_risky
+                if _is_risky(label):
+                    col.caption("⚠ Riskier path")
+            except Exception:
+                # If import fails or label cannot be evaluated, silently ignore
+                pass
         return None  # We never rely on the return value

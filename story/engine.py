@@ -75,6 +75,13 @@ def stream_scene(history: List[Dict[str,str]], lore: Dict) -> Generator[str, Non
         "Bonding cadence: include a brief affiliative exchange with an NPC if bonding_nudge is \"strong\" "
         "(and natural to the scene). Keep it subtle.\n"
         "Do not expose or mention control flags; they are guide rails for you only.\n"
+        "Consequence contract: If the last player choice was risky, show a visible cost in THIS scene "
+        "(wound, gear loss, time pressure, ally setback, exposure to threat). Do NOT undo it immediately. "
+        "If the player chose risky paths in two consecutive scenes, "
+        "escalate to a serious setback (capture, grave wound, loss), and carry it forward. "
+        "Only when fictionally fitting, you may kill the protagonist.\n"
+        "If (and only if) the protagonist dies in this scene, append exactly '\n\n[DEATH]' as the final line. "
+        "Do not add any text after [DEATH].\n"
     )
 
     # ---------- CONTROL FLAGS (computed, soft heuristics) ----------
@@ -122,10 +129,27 @@ def stream_scene(history: List[Dict[str,str]], lore: Dict) -> Generator[str, Non
         # Safety (shouldn’t happen now, but keeps things robust)
         name_clause = "No name is provided. Do not address the protagonist by any name; use 'you' only.\n"
 
+    # Risk & consequence control flags: compute current danger streak and injury level. If
+    # two risky choices in a row have been taken, must_escalate will be true.
+    danger_streak = int(st.session_state.get("danger_streak", 0))
+    injury_level = int(st.session_state.get("injury_level", 0))
+    risk_flags = {
+        "allow_fail_state": True,
+        "danger_streak": danger_streak,
+        "injury_level": injury_level,
+        "must_escalate": (danger_streak >= 2),
+    }
+    try:
+        risk_control_str = f"CONTROL FLAGS: {json.dumps(risk_flags)}\n"
+    except Exception:
+        # Fallback: if json.dumps fails (should not), use repr
+        risk_control_str = f"CONTROL FLAGS: {risk_flags}\n"
+
     # Lore text (serialized JSON)
     lore_blob = _lore_text(lore)
     user = (
         name_clause +
+        risk_control_str +
         control_flags +
         "Continue the story by one beat. Consider the world details below.\n"
         f"--- LORE JSON ---\n{lore_blob}\n--- END LORE ---\n\n"
@@ -253,6 +277,7 @@ def generate_choices(history, last_scene, LORE) -> List[str]:
         "Return ONLY a JSON array of two strings.\n"
         "Constraints: imperative voice (command form), do NOT start with 'You', ≤ 48 characters each, "
         "no trailing periods, options must be meaningfully different by approach and risk.\n"
+        "Provide one safer path and one clearly riskier path. Do not label them; let the risk difference be implied by the action itself.\n"
         "If bonding_nudge is \"strong\", let one option be prosocial (dialogue, help, trust) if it fits.\n"
         "Do not expose or mention control flags to the player."
     )
@@ -304,6 +329,30 @@ def generate_choices(history, last_scene, LORE) -> List[str]:
                 if fb.lower() not in seen:
                     cleaned.append(fb)
                     seen.add(fb.lower())
+
+        # Risk post-process: ensure that at least one choice conveys risk implicitly.
+        # If neither choice appears risky (per our keyword check), we do not append a tag
+        # but rely on the narrative model to decide risk. This preserves the user's
+        # experience without visibly marking one as risky.
+        if len(cleaned) == 2:
+            def _local_is_risky(label: str) -> bool:
+                try:
+                    # Use shared risk detection from the app if available
+                    from app import is_risky_label as _ir
+                    return _ir(label)
+                except Exception:
+                    # Fallback to a small set of risky verbs
+                    _words = {
+                        "charge","attack","fight","steal","stab","break","smash","dive",
+                        "jump","descend","enter","drink","touch","open the","confront",
+                        "cross","swim","sprint","bait","ambush","bleed","sacrifice","shout",
+                        "brave","risk","gamble","rush","kick","force","pry","ignite","set fire"
+                    }
+                    s = (label or "").lower()
+                    import re as _re
+                    return any(_re.search(rf"\b{_re.escape(w)}\b", s) for w in _words)
+            # We intentionally do nothing if both choices are safe; internal counters
+            # will treat them as safe but risk escalation is still tracked.
 
         return cleaned[:2]
 
