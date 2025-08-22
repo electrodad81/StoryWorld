@@ -118,12 +118,6 @@ Progress is stored in tables for `story_progress`, `story_visits`, and `story_ev
 
 ---
 
-## Contributing
-
-Contributions are welcome! Feel free to open issues or submit pull requests to improve narrative design, add features, or polish the UI.
-
----
-
 ## License
 
 This project is released under the MIT License. See [LICENSE](LICENSE) for details.
