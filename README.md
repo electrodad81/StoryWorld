@@ -48,7 +48,7 @@ StoryWorld/
 ├── story/engine.py     # Story generation & choice logic
 ├── ui/                 # CSS, streaming, loader, and choice rendering
 ├── data/               # SQLite & Neon database storage backends
-├── scripts/            # Dev/testing scripts (e.g., DB smoke test)
+├── scripts/            # Dev/testing scripts
 └── utils/              # Retry logic and helpers
 ```
 
