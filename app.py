@@ -423,7 +423,7 @@ def onboarding(pid: str):
         st.session_state["player_name"] = name.strip()
         st.session_state["player_gender"] = gender
         st.session_state["player_archetype"] = archetype
-        st.session_state["story_mode"] = bool(story_mode)
+        st.session_state["story_mode"] = (mode == "Story Mode")
         # Reset beat index on new start
         st.session_state["beat_index"] = 0
         st.session_state["story_complete"] = False
@@ -457,8 +457,6 @@ def hydrate_once_for(pid: str) -> None:
                     st.session_state["player_archetype"] = snap["archetype"]
     except Exception:
         pass
-
-
 
 # --------------------------
 # Main
