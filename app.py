@@ -394,12 +394,17 @@ def onboarding(pid: str):
     gender = st.selectbox("Gender", ["Unspecified", "Female", "Male", "Nonbinary"], index=0)
     archetype = st.selectbox("Character type", ["Default"], index=0)
 
-    # Story Mode (Experimental) toggle
-    story_mode_default = bool(st.session_state.get("story_mode", False))
-    story_mode = st.checkbox(
-        "Story Mode (Experimental)",
-        value=story_mode_default,
-        help="Guided 5-beat arc (Exposition → Rising Action → Climax → Falling Action → Resolution). Uncheck for classic freeform with risk/death."
+    # Mode selection: Story Mode vs. Exploration
+    mode_default_index = 0 if st.session_state.get("story_mode", True) else 1
+    mode = st.radio(
+        "Mode",
+        options=["Story Mode", "Exploration"],
+        index=mode_default_index,
+        help=(
+            "Story Mode: guided 5‑beat arc (Exposition → Rising Action → Climax → "
+            "Falling Action → Resolution). "
+            "Exploration: classic freeform with risk/death."
+        ),
     )
 
     col1, col2 = st.columns([1, 1])
