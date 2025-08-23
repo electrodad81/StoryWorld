@@ -203,35 +203,19 @@ def is_story_complete(state) -> bool:
 # --------------------------
 # Ending UI (non-death)
 # --------------------------
+# app.py – replace the entire contents of render_end_options
 def render_end_options(pid: str, slot) -> None:
     """
-    Render the conclusion options panel. This appears when the story arc completes
-    (e.g., after the resolution beat). It offers the player options to restart
-    the current story or begin a new one.
+    Render the conclusion message. When the story arc completes, inform the player
+    that the adventure is over and prompt them to start a new story using the sidebar.
     """
     with slot.container():
         st.subheader("Your adventure concludes.")
-        st.caption("The story arc has come to an end. What will you do next?")
-        c1, c2 = st.columns(2)
-        restart = c1.button("Restart this story", use_container_width=True, key="end_restart")
-        anew    = c2.button("Start a new story", use_container_width=True, key="end_new")
-        # Reset in‑memory state while preserving locked selections and story_mode.
-        reset_session(full_reset=False)
-        # Remove any persisted snapshot of the previous run
-        try:
-            delete_snapshot(pid)
-        except Exception:
-            pass
-        # Explicitly re‑initialise beat counters in Story Mode
-        if st.session_state.get("story_mode"):
-            st.session_state["beat_index"] = 0
-            st.session_state["_beat_scene_count"] = 0
-            st.session_state["story_complete"] = False
-        # Queue the first turn of the new run
-        st.session_state["pending_choice"] = "__start__"
-        st.session_state["is_generating"] = True
-        st.rerun()
-
+        st.caption("The story arc has come to an end.")
+        # Display a simple informational message instead of restart buttons
+        st.info(
+            "To begin a new adventure, use the **Start New Story** button in the left sidebar."
+        )
 
 # --------------------------
 # Main advance turn
