@@ -247,8 +247,9 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool = True):
             "decisions_count": sum(1 for m in hist if m.get("role") == "user"),
         })
 
-    # Show lantern in the choices area
-    render_thinking(grid_slot)
+    # Keep the choice buttons visible and greyed-out while the next scene streams
+    # (this draws a disabled “Generating…” button in each slot)
+    render_choices_grid(grid_slot, choices=None, generating=True, count=CHOICE_COUNT)
 
     # Determine beat only if Story Mode is ON
     beat = get_current_beat(st.session_state) if st.session_state.get("story_mode") else None
