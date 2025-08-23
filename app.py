@@ -3,6 +3,8 @@ from typing import Optional
 import time
 import json
 import streamlit as st
+import html as _html
+from html import escape as _esc
 
 # --- UI helpers (assumes these modules exist in your repo) ---
 from ui.anim import inject_css, render_thinking
@@ -497,6 +499,14 @@ def main():
     scene_ph   = st.empty()
     choices_ph = st.empty()
 
+    # Keep the storybox visible with the most recent scene
+    _last = st.session_state.get("scene")
+    if _last:
+        scene_ph.markdown(
+            f"<div class='storybox'>{_esc(_last).replace('\\n', ' ')}</div>",
+            unsafe_allow_html=True
+        )
+
     # Pending work
     if st.session_state.get("pending_choice") is not None:
         _advance_turn(pid, scene_ph, choices_ph, anim_enabled=True)
@@ -511,7 +521,9 @@ def main():
 
     # Render current scene and choices
     if st.session_state.get("scene"):
-        scene_ph.markdown(st.session_state["scene"], unsafe_allow_html=True)
+        scene_ph.markdown(
+            f"<div class='storybox'>{_esc(st.session_state['scene']).replace('\\n',' ')}</div>",
+            unsafe_allow_html=True
     render_choices_grid(
         choices_ph,
         choices=st.session_state.get("choices", []),
