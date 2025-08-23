@@ -76,6 +76,18 @@ def inject_css(enabled: bool = True) -> None:
             border-radius: 4px;
             box-shadow: 0 4px 8px rgba(0,0,0,.35);
         }
+
+        /* Constrain the app’s main content to the same width as the story box */
+        div.block-container {
+            max-width: 650px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        .choice-zone {
+            /* optional: could further style the choices area if you wrap it in this class */
+        }
+
         </style>
         """,
         unsafe_allow_html=True,
