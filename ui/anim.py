@@ -65,7 +65,7 @@ def inject_css(enabled: bool = True) -> None:
 
         /* A fixed story container for streaming text */
         .storybox {
-            max-width: 650px;
+            max-width: 750;
             margin-left: auto;
             margin-right: auto;
             padding: 1.2rem;
@@ -74,12 +74,12 @@ def inject_css(enabled: bool = True) -> None:
             color: #111111
             border: 1px solid rgba(255,255,255,.08);
             border-radius: 4px;
-            box-shadow: 0 4px 8px rgba(0,0,0,.35);
+            box-shadow: 0 2px 2px rgba(0,0,0,.35);
         }
 
         /* Constrain the app’s main content to the same width as the story box */
         div.block-container {
-            max-width: 650px;
+            max-width: 750px;
             margin-left: auto;
             margin-right: auto;
         }
