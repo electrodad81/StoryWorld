@@ -524,6 +524,7 @@ def main():
         scene_ph.markdown(
             f"<div class='storybox'>{_esc(st.session_state['scene']).replace('\\n',' ')}</div>",
             unsafe_allow_html=True
+            )
     render_choices_grid(
         choices_ph,
         choices=st.session_state.get("choices", []),
