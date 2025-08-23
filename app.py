@@ -6,6 +6,8 @@ import streamlit as st
 import html as _html
 from html import escape as _esc
 
+from core.identity import ensure_browser_id
+
 # --- UI helpers (assumes these modules exist in your repo) ---
 from ui.anim import inject_css, render_thinking
 from ui.streaming import stream_text
@@ -391,11 +393,11 @@ def onboarding(pid: str):
     st.markdown("Pick your setup. Name and character are locked once you begin.")
 
     name = st.text_input("Name", value=st.session_state.get("player_name") or "", max_chars=24)
-    #gender = st.selectbox("Gender", ["Unspecified", "Female", "Male", "Nonbinary"], index=0)
+    gender = st.selectbox("Gender", ["Unspecified", "Female", "Male", "Nonbinary"], index=0)
     archetype = st.selectbox("Character type", ["Default"], index=0)
 
     # Mode selection: Story Mode vs. Exploration
-    mode_default_index = 1 if st.session_state.get("story_mode", True) else 1
+    mode_default_index = 0 if st.session_state.get("story_mode", True) else 1
     mode = st.radio(
         "Mode",
         options=["Story Mode", "Exploration"],
@@ -430,6 +432,33 @@ def onboarding(pid: str):
         st.session_state["is_generating"] = True
         st.rerun()
 
+# hydration function to run before main():
+def hydrate_once_for(pid: str) -> None:
+    """
+    Load the persisted scene/choices/history from storage on the first run.
+    Uses the pid (browser ID) to look up the last snapshot.
+    """
+    if st.session_state.get("_hydrated"):
+        return
+    st.session_state["_hydrated"] = True
+    try:
+        if has_snapshot(pid):
+            snap = load_snapshot(pid)
+            if snap:
+                st.session_state["scene"] = snap.get("scene", "")
+                st.session_state["choices"] = snap.get("choices", [])
+                st.session_state["history"] = snap.get("history", [])
+                # Restore player profile if not already set
+                if snap.get("username") and not st.session_state.get("player_name"):
+                    st.session_state["player_name"] = snap["username"]
+                if snap.get("gender") and not st.session_state.get("player_gender"):
+                    st.session_state["player_gender"] = snap["gender"]
+                if snap.get("archetype") and not st.session_state.get("player_archetype"):
+                    st.session_state["player_archetype"] = snap["archetype"]
+    except Exception:
+        pass
+
+
 
 # --------------------------
 # Main
@@ -440,7 +469,10 @@ def main():
     ensure_keys()
     init_db()
 
-    pid = "local-user"  # simple identity; adjust as needed
+    # Use a persistent browser ID instead of "local-user"
+    pid = ensure_browser_id()
+    # Load any persisted snapshot once per session
+    hydrate_once_for(pid)
 
     # Sidebar controls (render early)
     try:
