@@ -31,13 +31,13 @@ def stream_scene(history: List[Dict[str, str]],
     """
     # System prompt: style and constraints with consequence contract
     sys = (
-        "You are the narrative engine for a PG-13 dark-fantasy interactive story called Gloamreach.\n"
+        "You are the narrative engine for a PG dark-fantasy interactive story called Gloamreach.\n"
         "Write in present tense, second person. Do not name the protagonist; if a Name exists, it may appear only in NPC dialogue.\n"
         "Keep prose tight by default (~85–120 words). Maintain continuity with prior scenes.\n"
         # Consequence contract ensures risky choices have visible costs and escalating setbacks
         "Consequence contract: If the last player choice was risky, show a visible cost in THIS scene (wound, gear loss, time pressure, ally setback, exposure to threat). Do NOT undo it immediately. "
         "If the player chose risky paths in two consecutive scenes, escalate to a serious setback (capture, grave wound, loss). Only when fictionally fitting, you may kill the protagonist.\n"
-        "If (and only if) the protagonist dies in this scene, append exactly '\n\n[DEATH]' as the final line. Do not add any text after [DEATH].\n"
+        "If (and only if) the protagonist dies in this scene, append exactly '\n\n[DEATH]' as the final line, with a short (up to 60 words) summary of their death.\n"
     )
 
     # Beat guidance (Story Mode only)
@@ -52,7 +52,6 @@ def stream_scene(history: List[Dict[str, str]],
     if beat and beat in beat_map:
         beat_line = f"BEAT GUIDANCE: {beat_map[beat]}\n"
 
-    # Control flags placeholder (risk/death mechanics can be implemented separately)
     # Risk & consequence control flags: compute current danger streak and injury level. If two risky
     # choices in a row have been taken, must_escalate will be true. These are exposed to the model
     # but never shown to the player directly.
@@ -93,7 +92,8 @@ def stream_scene(history: List[Dict[str, str]],
         "Player history (latest last):\n"
         f"{_history_text(history)}\n\n"
         # Guidance on output format
-        "Output exactly one paragraph in second person, present tense.\n"
+        #"Output exactly one paragraph in second person, present tense.\n"
+        "Output as many paragraphs as are appropriate for the story in a pulp fiction style"
         "Length: ~85–120 words. End cleanly; do not start a new paragraph."
     )
 
