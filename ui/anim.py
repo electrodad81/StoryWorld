@@ -69,7 +69,7 @@ def inject_css(enabled: bool = True) -> None:
             margin-left: auto;
             margin-right: auto;
             padding: 1.2rem;
-            min-height: 80rem;  /* adjust height as desired */
+            min-height: 40rem;  /* adjust height as desired */
             background: #fdf8f2;
             color: #333333;
             border: 1px solid #d8d8d8;
