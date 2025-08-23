@@ -80,6 +80,20 @@ def inject_css(enabled: bool = True) -> None:
             line-height: 1.6;
         }
 
+        /* Book‑like buttons for choices and actions */
+        .stButton>button {
+            background: #f6f4e9;
+            color: #333333;
+            border: 1px solid #c8c8c8;
+            border-radius: 6px;
+            padding: 10px 16px;
+            font-family: "Times New Roman", serif;
+        }
+        .stButton>button:hover {
+            background: #eee9d9;
+            border-color: #b8b8b8;
+        }
+
         /* Constrain the app’s main content to the same width as the story box */
         div.block-container {
             max-width: 750px;
