@@ -215,29 +215,22 @@ def render_end_options(pid: str, slot) -> None:
         c1, c2 = st.columns(2)
         restart = c1.button("Restart this story", use_container_width=True, key="end_restart")
         anew    = c2.button("Start a new story", use_container_width=True, key="end_new")
-        if restart or anew:
-            # Log the player's choice (restart vs new)
-            try:
-                save_event(pid, "complete_choice", {"action": "restart" if restart else "new"})
-            except Exception:
-                pass
-            # Clear the current run but keep locked selections (Name/Gender/Character) and story mode
-            for k in (
-                "scene", "choices", "history", "pending_choice", "is_generating",
-                "t_choices_visible_at", "t_scene_start", "is_dead", "beat_index", "story_complete",
-            ):
-                st.session_state.pop(k, None)
-            try:
-                delete_snapshot(pid)
-            except Exception:
-                pass
-            # Reset beat index to 0 for new arc if story mode is on
-            if st.session_state.get("story_mode"):
-                st.session_state["beat_index"] = 0
-                st.session_state["story_complete"] = False
-            st.session_state["pending_choice"] = "__start__"
-            st.session_state["is_generating"] = True
-            st.rerun()
+        # Reset in‑memory state while preserving locked selections and story_mode.
+        reset_session(full_reset=False)
+        # Remove any persisted snapshot of the previous run
+        try:
+            delete_snapshot(pid)
+        except Exception:
+            pass
+        # Explicitly re‑initialise beat counters in Story Mode
+        if st.session_state.get("story_mode"):
+            st.session_state["beat_index"] = 0
+            st.session_state["_beat_scene_count"] = 0
+            st.session_state["story_complete"] = False
+        # Queue the first turn of the new run
+        st.session_state["pending_choice"] = "__start__"
+        st.session_state["is_generating"] = True
+        st.rerun()
 
 
 # --------------------------
