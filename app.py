@@ -145,7 +145,7 @@ def ensure_keys():
     st.session_state.setdefault("is_dead", False)
 
     # Story mode toggle + beat tracking
-    st.session_state.setdefault("story_mode", False)
+    st.session_state.setdefault("story_mode", True)
     st.session_state.setdefault("beat_index", 0)
     st.session_state.setdefault("story_complete", False)
 
@@ -313,7 +313,9 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool = True):
         except TypeError:
             save_snapshot(pid, full, [], st.session_state["history"], username=username)
         # Show the death options panel and halt
-        render_death_options(pid, grid_slot)
+        # End the story when death occurs: mark it complete and show the standard conclusion panel
+        mark_story_complete()
+        render_end_options(pid, grid_slot)
         return
 
     # Beat progression (Story Mode only)
