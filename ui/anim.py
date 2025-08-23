@@ -35,7 +35,7 @@ def inject_css(enabled: bool = True) -> None:
           color:var(--ink);
           border:1px solid rgba(255,255,255,.08);
         }
-        
+
         .choice-zone .stButton>button:hover{
           border-color:rgba(245,158,11,.65);
         }
@@ -70,9 +70,10 @@ def inject_css(enabled: bool = True) -> None:
             margin-right: auto;
             padding: 1.2rem;
             min-height: 20rem;  /* adjust height as desired */
-            background: var(--card);
+            background: #fffff
+            color: #111111
             border: 1px solid rgba(255,255,255,.08);
-            border-radius: 14px;
+            border-radius: 4px;
             box-shadow: 0 8px 18px rgba(0,0,0,.35);
         }
         </style>
