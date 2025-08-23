@@ -8,58 +8,74 @@ def inject_css(enabled: bool = True) -> None:
         return
     st.markdown(
         """
-<style>
-:root{
-  --ink:#e9e9f5;
-  --card:#12131b;
-  --ring:#f59e0b; /* warm lantern */
-}
+        <style>
+        :root{
+          --ink:#e9e9f5;
+          --card:#12131b;
+          --ring:#f59e0b; /* warm lantern */
+        }
 
-/* Readable scene card (no overlay, no opacity tricks) */
-.scene-block{
-  color:var(--ink);
-  background:var(--card);
-  border:1px solid rgba(255,255,255,.08);
-  border-radius:14px;
-  padding:18px;
-  box-shadow:0 8px 18px rgba(0,0,0,.35);
-}
+        /* Readable scene card (no overlay, no opacity tricks) */
+        .scene-block{
+          color:var(--ink);
+          background:var(--card);
+          border:1px solid rgba(255,255,255,.08);
+          border-radius:14px;
+          padding:18px;
+          box-shadow:0 8px 18px rgba(0,0,0,.35);
+        }
 
-/* Choices — neutral styling, no popups */
-.choice-zone h3{ margin:0 0 8px 2px; color:#cfd0ff; font-weight:600; }
-.choice-zone .stButton>button{
-  width:100%;
-  border-radius:12px;
-  padding:12px 14px;
-  background:#171825;
-  color:var(--ink);
-  border:1px solid rgba(255,255,255,.08);
-}
-.choice-zone .stButton>button:hover{
-  border-color:rgba(245,158,11,.65);
-}
+        /* Choices — neutral styling, no popups */
+        .choice-zone h3{ margin:0 0 8px 2px; color:#cfd0ff; font-weight:600; }
+        .choice-zone .stButton>button{
+          width:100%;
+          border-radius:12px;
+          padding:12px 14px;
+          background:#171825;
+          color:var(--ink);
+          border:1px solid rgba(255,255,255,.08);
+        }
+        
+        .choice-zone .stButton>button:hover{
+          border-color:rgba(245,158,11,.65);
+        }
 
-/* Tiny pulsing lantern used while choices are computed */
-.lantern{
-  display:inline-flex; align-items:center; gap:8px;
-  color:#ffeab6; font-weight:600;
-}
-.lantern .bulb{
-  width:10px; height:10px; border-radius:50%;
-  background:#fcd34d;
-  box-shadow:0 0 8px #f59e0b, 0 0 16px rgba(245,158,11,.8);
-  animation:lanternPulse 1.1s ease-in-out infinite;
-}
-@keyframes lanternPulse{
-  0%,100%{ transform:scale(.95); box-shadow:0 0 6px #f59e0b, 0 0 12px rgba(245,158,11,.5) }
-  50%     { transform:scale(1.05); box-shadow:0 0 12px #f59e0b, 0 0 28px rgba(245,158,11,.9) }
-}
+        /* Tiny pulsing lantern used while choices are computed */
+        .lantern{
+          display:inline-flex; align-items:center; gap:8px;
+          color:#ffeab6; font-weight:600;
+        }
 
-/* Respect reduced motion */
-@media (prefers-reduced-motion: reduce){
-  *{ animation:none !important; transition:none !important }
-}
-</style>
+        .lantern .bulb{
+          width:10px; height:10px; border-radius:50%;
+          background:#fcd34d;
+          box-shadow:0 0 8px #f59e0b, 0 0 16px rgba(245,158,11,.8);
+          animation:lanternPulse 1.1s ease-in-out infinite;
+        }
+
+        @keyframes lanternPulse{
+          0%,100%{ transform:scale(.95); box-shadow:0 0 6px #f59e0b, 0 0 12px rgba(245,158,11,.5) }
+          50%     { transform:scale(1.05); box-shadow:0 0 12px #f59e0b, 0 0 28px rgba(245,158,11,.9) }
+        }
+
+        /* Respect reduced motion */
+        @media (prefers-reduced-motion: reduce){
+          *{ animation:none !important; transition:none !important }
+        }
+
+        /* A fixed story container for streaming text */
+        .storybox {
+            max-width: 650px;
+            margin-left: auto;
+            margin-right: auto;
+            padding: 1.2rem;
+            min-height: 20rem;  /* adjust height as desired */
+            background: var(--card);
+            border: 1px solid rgba(255,255,255,.08);
+            border-radius: 14px;
+            box-shadow: 0 8px 18px rgba(0,0,0,.35);
+        }
+        </style>
         """,
         unsafe_allow_html=True,
     )

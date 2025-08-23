@@ -7,7 +7,11 @@ from typing import Iterable
 def _render_text(slot: st.DeltaGenerator, text: str, caret: bool):
     safe = html.escape(text).replace("\n", "<br>")
     caret_html = ' <span class="typing-caret"></span>' if caret else ""
-    slot.markdown(f"<div>{safe}{caret_html}</div>", unsafe_allow_html=True)
+    # wrap the streaming text in the storybox container
+    slot.markdown(
+        f"<div class='storybox'>{safe}{caret_html}</div>",
+        unsafe_allow_html=True
+        )
 
 def stream_text(chunks: Iterable[str], target_slot: st.DeltaGenerator, show_caret: bool = True) -> str:
     """
