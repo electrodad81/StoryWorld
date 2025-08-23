@@ -1,44 +1,42 @@
-# app.py
-from __future__ import annotations
-from typing import List, Optional
-import streamlit as st
-from core.identity import ensure_browser_id
-from data.store import has_snapshot, delete_snapshot, load_snapshot, save_snapshot, save_visit
+import os
+from typing import Optional
+import time
 import json
-from story.engine import stream_scene, generate_choices
-from ui.anim import inject_css
+import streamlit as st
 
-import re  # for risk keyword matching
-
-from ui.loader import lantern
-from ui.anim import render_thinking
+# --- UI helpers (assumes these modules exist in your repo) ---
+from ui.anim import inject_css, render_thinking
 from ui.streaming import stream_text
 from ui.choices import render_choices_grid
+from ui.controls import sidebar_controls  # adjust import if your project structure differs
 
-from data.store import save_visit
+# --- Story engine ---
+from story.engine import stream_scene, generate_choices
 
-import time
-from data.store import save_event  # after you export it
-
-st.set_page_config(page_title="Gloamreach — Storyworld MVP", layout="wide")
-
-# Load lore.json once
-with open("lore.json", "r", encoding="utf-8") as f:
-    LORE = json.load(f)
-
-INTRO_SCENE = (
-    "In the land of Gloamreach, the sun never fully rises, leaving the world draped "
-    "in a curtain of twilight. Mist clings to the cobblestone streets like a whisper..."
+# --- Persistence / telemetry ---
+from data.store import (
+    init_db, save_snapshot, load_snapshot, delete_snapshot,
+    has_snapshot, save_visit, save_event
 )
-INTRO_CHOICES = ["Follow the creaking rope.", "Explore a shadowed alley."]
+
+# --- Lore data ---
+import pathlib
+ROOT = pathlib.Path(__file__).parent
+LORE_PATH = ROOT / "lore.json"
+LORE = json.loads(LORE_PATH.read_text(encoding="utf-8")) if LORE_PATH.exists() else {}
+
+# --- Constants ---
+CHOICE_COUNT = 2
+APP_TITLE = "Gloamreach"
 
 # -----------------------------------------------------------------------------
-# Risk & Consequence utilities (name-agnostic)
-# -----------------------------------------------------------------------------
+# Risk & Consequence utilities
+#
 # A set of keywords that indicate a risky choice. Feel free to tweak/extend
 # these terms to better fit your storyworld. The words are matched
 # case-insensitively as whole words using regular expressions.
-_RISKY_WORDS: set[str] = {
+import re
+_RISKY_WORDS = {
     "charge", "attack", "fight", "steal", "stab", "break", "smash", "dive",
     "jump", "descend", "enter", "drink", "touch", "open the", "confront",
     "cross", "swim", "sprint", "bait", "ambush", "bleed", "sacrifice", "shout",
@@ -105,255 +103,195 @@ def render_death_options(pid: str, slot) -> None:
             # Clear the current run but keep locked selections (Name/Gender/Character)
             for k in (
                 "scene", "choices", "history", "pending_choice", "is_generating",
-                "choices_before", "t_choices_visible_at", "t_scene_start", "is_dead"
+                "t_choices_visible_at", "t_scene_start", "is_dead", "beat_index", "story_complete"
             ):
                 st.session_state.pop(k, None)
             try:
                 delete_snapshot(pid)
             except Exception:
                 pass
+            # Reset beat index if story mode is on
+            if st.session_state.get("story_mode"):
+                st.session_state["beat_index"] = 0
+                st.session_state["story_complete"] = False
             st.session_state["pending_choice"] = "__start__"
             st.session_state["is_generating"] = True
             st.rerun()
 
-def inject_css():
-    """Inject global and local CSS styles.
-
-    This function first invokes the shared CSS injector from ``ui.anim`` to
-    ensure all base styles (including both ``.bulb`` and ``.flame`` classes)
-    are available. It then overlays any local customizations specific to
-    the top-level app, such as the radial gradient flame and caret styling.
-    """
-    # Import here to avoid circular import at module load time. Using the
-    # module-level ``inject_css`` from ``ui.anim`` ensures our local
-    # definition does not override the shared injector.
-    try:
-        from ui import anim as _anim
-        # Call the shared injector; guarded to prevent infinite recursion.
-        _anim.inject_css(enabled=True)
-    except Exception:
-        # Fallback: if import fails, continue silently. This may happen in
-        # certain testing contexts but should not prevent the app from
-        # rendering.
-        pass
-    st.markdown("""
-<style>
-/* Lantern flicker */
-.lantern { display:flex; align-items:center; gap:.5rem; margin:.25rem 0 .5rem 0; }
-.lantern .flame{
-  width:14px; height:14px; border-radius:50%;
-  box-shadow:0 0 10px 2px rgba(255,190,70,.7);
-  background:radial-gradient(circle at 40% 40%, #ffd27a 0%, #ff9a00 60%, #c96a00 100%);
-  animation:flame 1.3s ease-in-out infinite alternate;
-}
-@keyframes flame{
-  0%{ transform:translateY(0) scale(1); filter:brightness(1) }
-  100%{ transform:translateY(-1px) scale(1.08); filter:brightness(1.2) }
-}
-
-/* Optional: subtle typing caret used only during streaming */
-.typing-caret{ display:inline-block; width:.5ch; }
-.typing-caret::after{ content:"▌"; animation:blink .9s steps(1,end) infinite; }
-@keyframes blink{ 50% { opacity:0 } }
-
-/* Respect reduced motion */
-@media (prefers-reduced-motion: reduce){
-  *{ animation:none !important; transition:none !important }
-}
-</style>
-""", unsafe_allow_html=True)
-
-def hydrate_once_for(pid: str):
-    """Load snapshot once per pid into session_state (scene, choices, history, username)."""
-    if st.session_state.get("hydrated_for_pid") == pid:
-        return
-
-    snap = load_snapshot(pid)
-
-    if snap:
-        st.session_state["scene"]   = snap.get("scene") or ""
-        st.session_state["choices"] = snap.get("choices") or []
-        st.session_state["history"] = snap.get("history") or []
-        st.session_state["player_gender"] = snap["gender"]
-        # Only set username if the widget hasn't created the key this run
-        if snap and snap.get("username"):
-            st.session_state["player_name"] = snap["username"]
-            st.session_state.setdefault("player_username", snap["username"])  # compat
-
-    else:
-        st.session_state["scene"] = ""
-        st.session_state["choices"] = []
-        st.session_state["history"] = []
-        st.session_state.setdefault("player_username", "")
-
-    st.session_state["hydrated_for_pid"] = pid
-
-# --- Dev UI toggle (off by default) ------------------------------------------
-def _truthy(x) -> bool:
-    return str(x).strip().lower() in ("1", "true", "yes", "on")
-
-def _dev_default() -> bool:
-    import os
-    # Secrets/env can turn it on globally
-    if _truthy(os.getenv("DEBUG_UI") or st.secrets.get("DEBUG_UI", False)):
-        return True
-    # URL param ?dev=1 enables it per-session
-    try:
-        qp = getattr(st, "query_params", {})
-        val = qp.get("dev")
-        if isinstance(val, list):
-            val = val[0] if val else ""
-    except Exception:
-        q = st.experimental_get_query_params()
-        val = (q.get("dev", [""]) or [""])[0]
-    return _truthy(val)
-
-def render_sidebar_username(story_started: bool):
-    with st.sidebar:
-        if story_started:
-            st.session_state.setdefault("player_username", "")
-            st.text_input(
-                "Player username (optional)",
-                key="player_username",
-                placeholder="e.g., Nova",
-                max_chars=24,
-                help="Used in NPC dialogue only. You can change this anytime."
-            )
-        else:
-            st.caption("Set your username on the start screen.")
-
-def start_new_story():
-    """Kick the first deferred turn without touching browser_id."""
-    st.session_state["pending_choice"] = "__start__"
-    st.session_state["is_generating"] = True
-    st.rerun()
-
-def continue_story():
-    """Resume by running the next turn if we already have state."""
-    st.session_state["pending_choice"] = "__start__"
-    st.session_state["is_generating"] = True
-    st.rerun()
-
-def reset_story():
-    """Hard reset: wipe persisted snapshot and local state (keeps browser_id)."""
-    pid = st.session_state.get("browser_id")
-    try:
-        if pid and has_snapshot(pid):
-            delete_snapshot(pid)
-    except Exception:
-        pass
-    for k in ("scene","choices","history","pending_choice","is_generating","choices_before"):
-        if k in st.session_state:
-            del st.session_state[k]
-    start_new_story()
-
-def sidebar_controls(pid: str) -> Optional[str]:
-    st.sidebar.markdown("### Story Controls")
-    # Show both buttons explicitly
-    new_clicked = st.sidebar.button("Start New Story", use_container_width=True)
-    cont_clicked = st.sidebar.button("Continue", type="primary", use_container_width=True)
-    reset_clicked = st.sidebar.button("Reset", type="secondary", use_container_width=True)
-
-    if new_clicked:
-        reset_story()          # guarantees fresh start, then reruns
-        return "start_new"
-    if cont_clicked:
-        continue_story()       # continues current slot, then reruns
-        return "continue"
-    if reset_clicked:
-        reset_story()          # wipes and starts, then reruns
-        return "reset"
-    return None
-
-# --- reliable choice grid (inline) -----------------------------------
-def _current_turn_id() -> int:
-    """0-based count of user decisions; used to keep button keys unique."""
-    hist = st.session_state.get("history", [])
-    return sum(1 for m in hist if isinstance(m, dict) and m.get("role") == "user")
-
-def apply_choice(choice_label: str) -> None:
-    """Set flags that the main loop expects, then rerun."""
-    st.session_state["pending_choice"] = choice_label
-    st.session_state["is_generating"] = True
-    st.rerun()
-
-def _render_choices(choices: List[str], choices_ph):
-    with choices_ph.container():
-        st.subheader("Your choices")
-        c1, c2 = st.columns(2)
-        turn_id = len(st.session_state.get("history", []))  # changes each scene
-        if len(choices) >= 1 and c1.button(
-            choices[0], key=f"choice1_{turn_id}", use_container_width=True
-        ):
-            st.session_state["_picked"] = choices[0]
-        if len(choices) >= 2 and c2.button(
-            choices[1], key=f"choice2_{turn_id}", use_container_width=True
-        ):
-            st.session_state["_picked"] = choices[1]
-
-CHOICE_COUNT = 2
-
-def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool = True):
-    from data.store import save_snapshot, save_visit, save_event
-    st.session_state.setdefault("history", [])
-    st.session_state.setdefault("choices", [])
+# --------------------------
+# Utility: identity / session
+# --------------------------
+def ensure_keys():
     st.session_state.setdefault("scene", "")
+    st.session_state.setdefault("choices", [])
+    st.session_state.setdefault("history", [])
+    st.session_state.setdefault("pending_choice", None)
+    st.session_state.setdefault("is_generating", False)
+    st.session_state.setdefault("t_scene_start", None)
+    st.session_state.setdefault("t_choices_visible_at", None)
 
+    # Player profile
+    st.session_state.setdefault("player_name", None)
+    st.session_state.setdefault("player_gender", "Unspecified")
+    st.session_state.setdefault("player_archetype", "Default")
+
+    # Risk / death flags
+    st.session_state.setdefault("danger_streak", 0)
+    st.session_state.setdefault("injury_level", 0)
+    st.session_state.setdefault("is_dead", False)
+
+    # Story mode toggle + beat tracking
+    st.session_state.setdefault("story_mode", False)
+    st.session_state.setdefault("beat_index", 0)
+    st.session_state.setdefault("story_complete", False)
+
+    # Developer tools toggle (controls whether debug info is shown in sidebar)
+    st.session_state.setdefault("_dev", False)
+
+    # Beat scene counter (tracks scenes within the current beat)
+    st.session_state.setdefault("_beat_scene_count", 0)
+
+
+def reset_session(full_reset=False):
+    """Clear out session. If full_reset, also clear player profile."""
+    keep = {}
+    if not full_reset:
+        keep["player_name"] = st.session_state.get("player_name")
+        keep["player_gender"] = st.session_state.get("player_gender", "Unspecified")
+        keep["player_archetype"] = st.session_state.get("player_archetype", "Default")
+        keep["story_mode"] = bool(st.session_state.get("story_mode", False))
+
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+
+    ensure_keys()
+    for k, v in keep.items():
+        st.session_state[k] = v
+
+
+# --------------------------
+# Story Mode helpers (beats)
+# --------------------------
+BEATS = ["exposition", "rising_action", "climax", "falling_action", "resolution"]
+
+# Target number of scenes per beat. Once the count meets or exceeds the target,
+# the story progresses to the next beat. Feel free to adjust counts to tune
+# pacing (classic CYOA arcs usually have ~8–12 scenes total).
+BEAT_TARGET_SCENES = {
+    "exposition": 2,
+    "rising_action": 3,
+    "climax": 2,
+    "falling_action": 2,
+    "resolution": 1,
+}
+
+def get_current_beat(state) -> str:
+    i = int(state.get("beat_index", 0))
+    i = max(0, min(i, len(BEATS) - 1))
+    return BEATS[i]
+
+def advance_beat():
+    st.session_state["beat_index"] = min(st.session_state["beat_index"] + 1, len(BEATS) - 1)
+
+def mark_story_complete():
+    st.session_state["story_complete"] = True
+
+def is_story_complete(state) -> bool:
+    return bool(state.get("story_complete", False))
+
+
+# --------------------------
+# Ending UI (non-death)
+# --------------------------
+def render_end_options(pid: str, slot) -> None:
+    """
+    Render the conclusion options panel. This appears when the story arc completes
+    (e.g., after the resolution beat). It offers the player options to restart
+    the current story or begin a new one.
+    """
+    with slot.container():
+        st.subheader("Your adventure concludes.")
+        st.caption("The story arc has come to an end. What will you do next?")
+        c1, c2 = st.columns(2)
+        restart = c1.button("Restart this story", use_container_width=True, key="end_restart")
+        anew    = c2.button("Start a new story", use_container_width=True, key="end_new")
+        if restart or anew:
+            # Log the player's choice (restart vs new)
+            try:
+                save_event(pid, "complete_choice", {"action": "restart" if restart else "new"})
+            except Exception:
+                pass
+            # Clear the current run but keep locked selections (Name/Gender/Character) and story mode
+            for k in (
+                "scene", "choices", "history", "pending_choice", "is_generating",
+                "t_choices_visible_at", "t_scene_start", "is_dead", "beat_index", "story_complete",
+            ):
+                st.session_state.pop(k, None)
+            try:
+                delete_snapshot(pid)
+            except Exception:
+                pass
+            # Reset beat index to 0 for new arc if story mode is on
+            if st.session_state.get("story_mode"):
+                st.session_state["beat_index"] = 0
+                st.session_state["story_complete"] = False
+            st.session_state["pending_choice"] = "__start__"
+            st.session_state["is_generating"] = True
+            st.rerun()
+
+
+# --------------------------
+# Main advance turn
+# --------------------------
+def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool = True):
+    """
+    Advance the story by streaming the next scene, updating history and choices,
+    and handling death or story completion. In Story Mode, beat progression
+    determines when the arc concludes; in classic mode, the story continues
+    indefinitely until death.
+    """
     old_choices = list(st.session_state.get("choices", []))
     picked = st.session_state.get("pending_choice")
 
-    # Update risk counters for this pick (increments on risky, decrements on safe)
-    # Do this before logging the choice event so that danger_streak reflects the
-    # current pick in telemetry.
-    try:
-        update_consequence_counters(picked)
-    except Exception:
-        pass
+    # Update risk counters (danger streak / injury level) based on the picked choice
+    update_consequence_counters(picked)
 
-    # --- CHOICE EVENT + latency (time from choices visible → click)
+    # Choice telemetry
     if picked and picked != "__start__":
         hist = st.session_state["history"]
         if not hist or hist[-1].get("role") != "user" or hist[-1].get("content") != picked:
             hist.append({"role": "user", "content": picked})
-
         visible_at = st.session_state.get("t_choices_visible_at")
         latency_ms = int((time.time() - visible_at) * 1000) if visible_at else None
-        # Include danger_streak in choice telemetry
         save_event(pid, "choice", {
             "label": picked,
             "index": (old_choices.index(picked) if picked in old_choices else None),
             "latency_ms": latency_ms,
             "decisions_count": sum(1 for m in hist if m.get("role") == "user"),
-            "danger_streak": st.session_state.get("danger_streak", 0),
         })
 
-    # show the lantern loader in place of the choices while we generate the next scene
-    # using ui.anim.render_thinking to ensure the glow appears in the same slot
-    try:
-        # this writes the lantern into the choices area; it will be overwritten when buttons render
-        render_thinking(grid_slot)
-    except Exception:
-        # if the import fails, fall back to neutral placeholders (no buttons)
-        render_choices_grid(grid_slot, choices=None, generating=True, count=CHOICE_COUNT)
+    # Show lantern in the choices area
+    render_thinking(grid_slot)
 
-    # --- mark scene stream start (dwell timer)
+    # Determine beat only if Story Mode is ON
+    beat = get_current_beat(st.session_state) if st.session_state.get("story_mode") else None
+
+    # Stream next scene
     st.session_state["t_scene_start"] = time.time()
-
-    # stream scene
     if anim_enabled:
-        # no need to use the loader context here since the lantern is shown in the grid slot
-        full = stream_text(stream_scene(st.session_state["history"], LORE), story_slot, show_caret=True)
+        full = stream_text(stream_scene(st.session_state["history"], LORE, beat=beat), story_slot, show_caret=True)
     else:
-        full = stream_text(stream_scene(st.session_state["history"], LORE), story_slot, show_caret=False)
+        full = stream_text(stream_scene(st.session_state["history"], LORE, beat=beat), story_slot, show_caret=False)
 
-    # DEATH sentinel detection: model will append [DEATH] on a fatal scene
+    # Check for death sentinel: if scene ends with '[DEATH]', set died flag and strip it
     died = False
     stripped = full.rstrip()
     if stripped.endswith("[DEATH]"):
         died = True
+        # Remove the sentinel from the displayed text
         full = stripped[: -len("[DEATH]")].rstrip()
 
-    # finalize history
+    # Append scene to history
     st.session_state["history"].append({"role": "assistant", "content": full})
     st.session_state["scene"] = full
 
@@ -388,18 +326,50 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool = True):
         gender    = st.session_state.get("player_gender")
         archetype = st.session_state.get("player_archetype")
         try:
-            save_snapshot(pid, full, [], st.session_state["history"], username=username, gender=gender, archetype=archetype)
+            save_snapshot(pid, full, [], st.session_state["history"],
+                          username=username, gender=gender, archetype=archetype)
         except TypeError:
             save_snapshot(pid, full, [], st.session_state["history"], username=username)
         # Show the death options panel and halt
         render_death_options(pid, grid_slot)
         return
 
-    # choices next
+    # Beat progression (Story Mode only)
+    if st.session_state.get("story_mode"):
+        # Increment scene counter for the current beat
+        st.session_state["_beat_scene_count"] = st.session_state.get("_beat_scene_count", 0) + 1
+        current_beat = get_current_beat(st.session_state)
+        # Determine target scenes for this beat
+        target = BEAT_TARGET_SCENES.get(current_beat, 1)
+        # If we've reached or exceeded the target, move to next beat or conclude
+        if st.session_state["_beat_scene_count"] >= target:
+            if current_beat == "resolution":
+                # End of resolution: mark story complete
+                mark_story_complete()
+            else:
+                # Advance to next beat and reset counter
+                st.session_state["beat_index"] = min(st.session_state.get("beat_index", 0) + 1, len(BEATS) - 1)
+                st.session_state["_beat_scene_count"] = 0
+
+    # If story is complete, don't generate more choices; show ending options
+    if is_story_complete(st.session_state):
+        # Persist final scene
+        username  = st.session_state.get("player_name") or st.session_state.get("player_username") or None
+        gender    = st.session_state.get("player_gender")
+        archetype = st.session_state.get("player_archetype")
+        try:
+            save_snapshot(pid, full, [], st.session_state["history"], username=username, gender=gender, archetype=archetype)
+        except TypeError:
+            save_snapshot(pid, full, [], st.session_state["history"], username=username)
+        # Show conclusion panel
+        render_end_options(pid, grid_slot)
+        return
+
+    # Generate choices (free mode and story mode alike)
     choices = generate_choices(st.session_state["history"], full, LORE)
     st.session_state["choices"] = choices
 
-    # --- persist snapshot (username + gender/archetype if supported)
+    # Persist snapshot
     username  = st.session_state.get("player_name") or st.session_state.get("player_username") or None
     gender    = st.session_state.get("player_gender")
     archetype = st.session_state.get("player_archetype")
@@ -409,7 +379,7 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool = True):
     except TypeError:
         save_snapshot(pid, full, choices, st.session_state["history"], username=username)
 
-    # visit row
+    # Visit record
     choice_text, choice_index = None, None
     if picked and picked != "__start__":
         choice_text = str(picked)
@@ -419,168 +389,159 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool = True):
             choice_index = None
     save_visit(pid, full, choice_text, choice_index)
 
-    # --- SCENE EVENT: word count + dwell (time on scene until next click measured next run)
+    # Scene telemetry
     word_count = len(full.split())
     save_event(pid, "scene", {
         "word_count": word_count,
         "has_choice": bool(choices),
         "choices_count": len(choices or []),
-        "danger_streak": st.session_state.get("danger_streak", 0),
+        "beat": beat if beat else "classic",
     })
 
-    # render fresh buttons
+    # Render real buttons
     render_choices_grid(grid_slot, choices=choices, generating=False, count=CHOICE_COUNT)
+    st.session_state["t_choices_visible_at"] = time.time()
 
 
-def render_onboarding(pid: str):
+# --------------------------
+# Onboarding UI
+# --------------------------
+def onboarding(pid: str):
     st.header("Begin Your Journey")
     st.markdown("Pick your setup. Name and character are locked once you begin.")
 
-    # Required Name
-    name = st.text_input("Name", key="onb_name", placeholder="e.g., Nova", max_chars=24)
-    gender = st.selectbox("Gender", ["Unspecified", "Female", "Male", "Nonbinary"], index=0, key="onb_gender")
-    archetype = st.selectbox("Character type", ["Default"], index=0, key="onb_archetype")
+    name = st.text_input("Name", value=st.session_state.get("player_name") or "", max_chars=24)
+    gender = st.selectbox("Gender", ["Unspecified", "Female", "Male", "Nonbinary"], index=0)
+    archetype = st.selectbox("Character type", ["Default"], index=0)
 
-    c1, c2 = st.columns([1, 1])
-    begin = c1.button("Begin Adventure", use_container_width=True, disabled=not name.strip())
-    reset  = c2.button("Reset Choices", use_container_width=True)
+    # Story Mode (Experimental) toggle
+    story_mode_default = bool(st.session_state.get("story_mode", False))
+    story_mode = st.checkbox(
+        "Story Mode (Experimental)",
+        value=story_mode_default,
+        help="Guided 5-beat arc (Exposition → Rising Action → Climax → Falling Action → Resolution). Uncheck for classic freeform with risk/death."
+    )
+
+    col1, col2 = st.columns([1, 1])
+    # Provide unique keys for buttons to avoid StreamlitDuplicateElementId errors.
+    begin = col1.button("Begin Adventure", use_container_width=True, disabled=not name.strip(), key="onboard_begin")
+    reset = col2.button("Reset Session", use_container_width=True, key="onboard_reset")
+
+    if reset:
+        delete_snapshot(pid)
+        reset_session(full_reset=True)
+        st.rerun()
 
     if begin:
-        # Lock selections for this session
         st.session_state["player_name"] = name.strip()
-        st.session_state["player_username"] = st.session_state["player_name"]  # compat with existing code
         st.session_state["player_gender"] = gender
         st.session_state["player_archetype"] = archetype
-
+        st.session_state["story_mode"] = bool(story_mode)
+        # Reset beat index on new start
+        st.session_state["beat_index"] = 0
+        st.session_state["story_complete"] = False
         # Queue first turn
         st.session_state["pending_choice"] = "__start__"
         st.session_state["is_generating"] = True
         st.rerun()
 
-    if reset:
-        for k in ("onb_name", "onb_gender", "onb_archetype"):
-            st.session_state.pop(k, None)
-        st.rerun()
 
+# --------------------------
+# Main
+# --------------------------
 def main():
-    st.title("Gloamreach — Storyworld MVP")
-
-    # --- Atmosphere: always ON, no checkbox ---
-    anim_enabled = True
+    st.set_page_config(page_title=APP_TITLE, page_icon="🕯️", layout="wide")
     inject_css()
-
-    # --- Developer mode ---
-    if "_dev" not in st.session_state:
-        try:
-            st.session_state["_dev"] = _dev_default()
-        except NameError:
-            st.session_state["_dev"] = False
-    with st.sidebar:
-        if st.session_state["_dev"]:
-            st.session_state["_dev"] = st.checkbox("Developer tools", value=True, help="Show debug info & self-tests")
-    dev = bool(st.session_state["_dev"])
-
-    # --- Identity & storage ---
-    from data.store import init_db, save_snapshot, load_snapshot, delete_snapshot, has_snapshot, save_event
-    pid = ensure_browser_id()
+    ensure_keys()
     init_db()
 
-    # --- Fixed body slots ---
-    scene_ph   = st.empty()
-    choices_ph = st.empty()
+    pid = "local-user"  # simple identity; adjust as needed
 
-    # --- Sidebar controls: render EARLY every run so they never vanish ---
+    # Sidebar controls (render early)
     try:
-        from ui.controls import sidebar_controls
+        action = sidebar_controls(pid)
     except Exception:
-        from controls import sidebar_controls  # fallback if file lives at project root
-    action = sidebar_controls(pid)
+        action = None
 
+    # Developer tools panel in sidebar. This displays debug information when enabled.
+    # Initialize _dev flag on first run if not already set.
+    if "_dev" not in st.session_state:
+        st.session_state["_dev"] = False
+    # Render dev toggle and info in the sidebar after the core controls
+    with st.sidebar:
+        # Checkbox to toggle developer tools
+        st.session_state["_dev"] = st.checkbox(
+            "Developer tools", value=bool(st.session_state["_dev"]), help="Show debug info & self-tests"
+        )
+        if st.session_state["_dev"]:
+            # Show basic debug information
+            beat = get_current_beat(st.session_state) if st.session_state.get("story_mode") else "classic"
+            st.caption(
+                f"Story Mode: {'on' if st.session_state.get('story_mode') else 'off'} • "
+                f"Beat: {beat} • Danger streak: {st.session_state.get('danger_streak', 0)} • "
+                f"Scenes: {len(st.session_state.get('history', []))}"
+            )
+
+    # Handle sidebar actions
     if action == "start":
         # Hard reset persisted + in-memory, then queue first turn
         try:
             delete_snapshot(pid)
         except Exception:
             pass
-        for k in ("scene", "choices", "history", "pending_choice", "is_generating",
-                  "choices_before", "t_choices_visible_at", "t_scene_start"):
+        for k in (
+            "scene", "choices", "history", "pending_choice", "is_generating",
+            "t_choices_visible_at", "t_scene_start", "is_dead", "beat_index", "story_complete"
+        ):
             st.session_state.pop(k, None)
-
+        # Reset beat index for story mode
+        if st.session_state.get("story_mode"):
+            st.session_state["beat_index"] = 0
+            st.session_state["story_complete"] = False
         st.session_state["pending_choice"] = "__start__"
         st.session_state["is_generating"] = True
-        try:
-            save_event(pid, "start", {"username": st.session_state.get("player_username") or None})
-        except Exception:
-            pass
         st.rerun()
-
     elif action == "reset":
+        # Full reset (clear profile)
         try:
             delete_snapshot(pid)
         except Exception:
             pass
         for k in (
-            "scene","choices","history","pending_choice","is_generating","choices_before",
-            "t_choices_visible_at","t_scene_start",
-            # also clear locked selections:
-            "player_name","player_username","player_gender","player_archetype"
+            "scene", "choices", "history", "pending_choice", "is_generating",
+            "t_choices_visible_at", "t_scene_start", "is_dead", "beat_index", "story_complete",
+            "player_name", "player_gender", "player_archetype", "story_mode"
         ):
             st.session_state.pop(k, None)
         st.rerun()
 
-    # --- Hydrate AFTER handling actions ---
-    hydrate_once_for(pid)
+    # Fixed body slots
+    scene_ph   = st.empty()
+    choices_ph = st.empty()
 
-    # --- Pending work FIRST (no duplicate text) ---
-    # Buttons remain visible because we rendered them already above.
+    # Pending work
     if st.session_state.get("pending_choice") is not None:
-        _advance_turn(pid, scene_ph, choices_ph, anim_enabled)
+        _advance_turn(pid, scene_ph, choices_ph, anim_enabled=True)
         st.session_state["pending_choice"] = None
+        st.session_state["is_generating"] = False
+        st.stop()
+
+    # Brand new or after reset: show onboarding
+    if not st.session_state.get("scene"):
+        onboarding(pid)
         return
 
-    # --- Onboarding for brand-new players (no scene and no snapshot) ---
-    brand_new = (not st.session_state.get("scene")) and (not has_snapshot(pid))
-    if brand_new:
-        render_onboarding(pid)
-        return  # prevents sidebar username from rendering this run
+    # Render current scene and choices
+    if st.session_state.get("scene"):
+        scene_ph.markdown(st.session_state["scene"], unsafe_allow_html=True)
+    render_choices_grid(
+        choices_ph,
+        choices=st.session_state.get("choices", []),
+        generating=False,
+        count=CHOICE_COUNT
+    )
+    st.session_state["t_choices_visible_at"] = time.time()
 
-    # --- Sidebar username (render exactly once, post-onboarding) ---
-    with st.sidebar:
-        # Show locked Name (no editing)
-        name_locked = st.session_state.get("player_name") or st.session_state.get("player_username") or ""
-        if name_locked:
-            st.caption("Name")
-            st.text_input("Name", value=name_locked, key="locked_name", disabled=True)
-
-    # --- Debug UI (dev only) ---
-    if dev:
-        import os, json
-        db_url = os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL")
-        with st.sidebar.expander("DB self-test", expanded=False):
-            pid_for_test = st.session_state.get("browser_id", "no-id")
-            if st.button("Write probe row"):
-                init_db()
-                save_snapshot(pid_for_test, "PROBE_SCENE", ["A", "B"], [{"role": "assistant", "content": "probe"}])
-                st.success("Wrote probe row")
-            if st.button("Read probe row"):
-                snap = load_snapshot(pid_for_test)
-                st.code(json.dumps(snap, indent=2))
-
-    # --- Normal render ---
-    if not st.session_state.get("scene"):
-        st.info("Click **Start New Story** in the sidebar to begin.")
-    else:
-        scene_ph.markdown(st.session_state["scene"])
-        # Choices are about to be visible (for latency calc on click)
-        st.session_state["t_choices_visible_at"] = time.time()
-
-        from ui.choices import render_choices_grid
-        render_choices_grid(
-            choices_ph,
-            choices=st.session_state.get("choices", []),
-            generating=False,
-            count=CHOICE_COUNT if "CHOICE_COUNT" in globals() else 2,
-        )
 
 if __name__ == "__main__":
     main()
