@@ -391,7 +391,7 @@ def onboarding(pid: str):
     st.markdown("Pick your setup. Name and character are locked once you begin.")
 
     name = st.text_input("Name", value=st.session_state.get("player_name") or "", max_chars=24)
-    gender = st.selectbox("Gender", ["Unspecified", "Female", "Male", "Nonbinary"], index=0)
+    #gender = st.selectbox("Gender", ["Unspecified", "Female", "Male", "Nonbinary"], index=0)
     archetype = st.selectbox("Character type", ["Default"], index=0)
 
     # Mode selection: Story Mode vs. Exploration
