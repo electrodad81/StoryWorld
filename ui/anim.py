@@ -70,11 +70,14 @@ def inject_css(enabled: bool = True) -> None:
             margin-right: auto;
             padding: 1.2rem;
             min-height: 20rem;  /* adjust height as desired */
-            background: #fffff
-            color: #111111
-            border: 1px solid rgba(255,255,255,.08);
+            background: #fdf8f2;
+            color: #333333;
+            border: 1px solid #d8d8d8;
             border-radius: 4px;
             box-shadow: 0 2px 2px rgba(0,0,0,.35);
+            font-family: "Times New Roman", serif;
+            font-size: 1.1rem;
+            line-height: 1.6;
         }
 
         /* Constrain the app’s main content to the same width as the story box */
