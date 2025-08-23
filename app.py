@@ -395,7 +395,7 @@ def onboarding(pid: str):
     archetype = st.selectbox("Character type", ["Default"], index=0)
 
     # Mode selection: Story Mode vs. Exploration
-    mode_default_index = 0 if st.session_state.get("story_mode", True) else 1
+    mode_default_index = 1 if st.session_state.get("story_mode", True) else 1
     mode = st.radio(
         "Mode",
         options=["Story Mode", "Exploration"],
