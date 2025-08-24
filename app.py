@@ -3,10 +3,6 @@ from typing import Optional
 import time
 import json
 import streamlit as st
-import html as _html
-from html import escape as _esc
-
-from core.identity import ensure_browser_id
 
 # --- UI helpers (assumes these modules exist in your repo) ---
 from ui.anim import inject_css, render_thinking
@@ -15,13 +11,53 @@ from ui.choices import render_choices_grid
 from ui.controls import sidebar_controls  # adjust import if your project structure differs
 
 # --- Story engine ---
-from story.engine import stream_scene, generate_choices
+from story.engine import stream_scene, generate_choices, generate_illustration
 
 # --- Persistence / telemetry ---
 from data.store import (
     init_db, save_snapshot, load_snapshot, delete_snapshot,
     has_snapshot, save_visit, save_event
 )
+
+from concurrent.futures import ThreadPoolExecutor
+import hashlib, re
+
+@st.cache_resource
+def _ill_executor() -> ThreadPoolExecutor:
+    return ThreadPoolExecutor(max_workers=2)
+
+def _has_first_sentence(txt: str) -> Optional[str]:
+    """Return the first complete sentence with a minimum length, else None."""
+    m = re.search(r"(.+?[.!?])(\s|$)", txt or "")
+    if not m:
+        return None
+    sent = m.group(1).strip()
+    return sent if len(sent.split()) >= 8 else None  # avoid tiny fragments
+
+def _scene_key(text: str, simple: bool) -> str:
+    h = hashlib.md5((text.strip() + f"|{simple}").encode("utf-8")).hexdigest()
+    return f"ill-{h}"
+
+def _start_illustration_job(seed_sentence: str, simple: bool) -> str:
+    """Kick off background illustration generation for a seed sentence."""
+    key = _scene_key(seed_sentence, simple)
+    jobs = st.session_state.setdefault("ill_jobs", {})
+    if key in jobs:
+        return key
+    fut = _ill_executor().submit(generate_illustration, seed_sentence, simple)  # returns (img_ref, dbg) or single
+    jobs[key] = {"future": fut, "result": None}
+    return key
+
+def _job_for_scene(scene_text: str, simple: bool):
+    """Return (key, job_dict|None) for the current scene."""
+    seed = _has_first_sentence(scene_text) or (scene_text or "").strip()
+    key  = _scene_key(seed, simple)
+    jobs = st.session_state.get("ill_jobs", {})
+    return key, jobs.get(key)
+
+# (optional) if you want a caret while streaming and you're not already adding one in CSS:
+def _with_caret(txt: str) -> str:
+    return f'{txt}<span class="caret">▋</span>'
 
 # --- Lore data ---
 import pathlib
@@ -136,7 +172,7 @@ def ensure_keys():
 
     # Player profile
     st.session_state.setdefault("player_name", None)
-    st.session_state.setdefault("player_gender", "Unspecified")
+    #st.session_state.setdefault("player_gender", "Unspecified")
     st.session_state.setdefault("player_archetype", "Default")
 
     # Risk / death flags
@@ -207,19 +243,42 @@ def is_story_complete(state) -> bool:
 # --------------------------
 # Ending UI (non-death)
 # --------------------------
-# app.py – replace the entire contents of render_end_options
 def render_end_options(pid: str, slot) -> None:
     """
-    Render the conclusion message. When the story arc completes, inform the player
-    that the adventure is over and prompt them to start a new story using the sidebar.
+    Render the conclusion options panel. This appears when the story arc completes
+    (e.g., after the resolution beat). It offers the player options to restart
+    the current story or begin a new one.
     """
     with slot.container():
         st.subheader("Your adventure concludes.")
-        st.caption("The story arc has come to an end.")
-        # Display a simple informational message instead of restart buttons
-        st.info(
-            "To begin a new adventure, use the **Start New Story** button in the left sidebar."
-        )
+        st.caption("The story arc has come to an end. What will you do next?")
+        c1, c2 = st.columns(2)
+        restart = c1.button("Restart this story", use_container_width=True, key="end_restart")
+        anew    = c2.button("Start a new story", use_container_width=True, key="end_new")
+        if restart or anew:
+            # Log the player's choice (restart vs new)
+            try:
+                save_event(pid, "complete_choice", {"action": "restart" if restart else "new"})
+            except Exception:
+                pass
+            # Clear the current run but keep locked selections (Name/Gender/Character) and story mode
+            for k in (
+                "scene", "choices", "history", "pending_choice", "is_generating",
+                "t_choices_visible_at", "t_scene_start", "is_dead", "beat_index", "story_complete",
+            ):
+                st.session_state.pop(k, None)
+            try:
+                delete_snapshot(pid)
+            except Exception:
+                pass
+            # Reset beat index to 0 for new arc if story mode is on
+            if st.session_state.get("story_mode"):
+                st.session_state["beat_index"] = 0
+                st.session_state["story_complete"] = False
+            st.session_state["pending_choice"] = "__start__"
+            st.session_state["is_generating"] = True
+            st.rerun()
+
 
 # --------------------------
 # Main advance turn
@@ -233,6 +292,8 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool = True):
     """
     old_choices = list(st.session_state.get("choices", []))
     picked = st.session_state.get("pending_choice")
+    st.session_state["last_illustration_url"] = None
+    st.session_state["last_illustration_debug"] = {}
 
     # Update risk counters (danger streak / injury level) based on the picked choice
     update_consequence_counters(picked)
@@ -251,19 +312,43 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool = True):
             "decisions_count": sum(1 for m in hist if m.get("role") == "user"),
         })
 
-    # Keep the choice buttons visible and greyed-out while the next scene streams
-    # (this draws a disabled “Generating…” button in each slot)
-    render_choices_grid(grid_slot, choices=None, generating=True, count=CHOICE_COUNT)
+    # Show lantern in the choices area
+    render_thinking(grid_slot)
 
     # Determine beat only if Story Mode is ON
     beat = get_current_beat(st.session_state) if st.session_state.get("story_mode") else None
 
-    # Stream next scene
+    # Stream next scene (manual loop so we can kick off illustration early)
     st.session_state["t_scene_start"] = time.time()
-    if anim_enabled:
-        full = stream_text(stream_scene(st.session_state["history"], LORE, beat=beat), story_slot, show_caret=True)
-    else:
-        full = stream_text(stream_scene(st.session_state["history"], LORE, beat=beat), story_slot, show_caret=False)
+
+    gen = stream_scene(st.session_state["history"], LORE, beat=beat)  # generator[str]
+
+    simple_flag = bool(st.session_state.get("simple_cyoa", True))
+    auto_ill    = bool(st.session_state.get("auto_illustrate", True))  # add a checkbox if you want this user-toggable
+    scene_count = int(st.session_state.get("scene_count", 0))
+    started_early = False
+    buffer = []
+
+    for chunk in gen:
+        buffer.append(chunk)
+        text_so_far = "".join(buffer)
+
+        # render...
+        story_slot.markdown(
+            (f'{text_so_far}<span class="caret">▋</span>' if anim_enabled else text_so_far),
+            unsafe_allow_html=True
+        )
+
+        # EARLY kickoff for 1st scene (and you can add %3 later)
+        if auto_ill and not started_early and (scene_count == 0):
+            seed = _has_first_sentence(text_so_far)
+            if not seed and len(text_so_far.split()) >= 12:
+                seed = " ".join(text_so_far.split()[:18]) + "…"
+            if seed:
+                _start_illustration_job(seed, simple_flag)  # remembers ill_last_key
+                started_early = True
+
+    full = "".join(buffer)
 
     # Check for death sentinel: if scene ends with '[DEATH]', set died flag and strip it
     died = False
@@ -274,8 +359,25 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool = True):
         full = stripped[: -len("[DEATH]")].rstrip()
 
     # Append scene to history
-    st.session_state["history"].append({"role": "assistant", "content": full})
     st.session_state["scene"] = full
+    st.session_state["history"].append({"role": "assistant", "content": full})
+
+    # --- Illustration generation: optionally generate and display an image for this scene ---
+    scene_count = st.session_state.get("scene_count", 0)
+    img_url = None  # <-- make sure it's always defined
+
+    #if scene_count % 3 == 0:
+    #    try:
+    #        img_url = generate_illustration(full)
+    #    except Exception:
+    #       img_url = None
+
+    #    if img_url:
+    #       story_slot.image(img_url, caption="Illustration", use_column_width=True)
+
+    # Save the last image URL (or None) for the dev panel
+    st.session_state["last_illustration_url"] = img_url
+    st.session_state["scene_count"] = int(st.session_state.get("scene_count", 0)) + 1
 
     # Evaluate expected cost: if pick was risky or must_escalate (danger streak ≥ 2)
     must_escalate = st.session_state.get("danger_streak", 0) >= 2
@@ -313,9 +415,7 @@ def _advance_turn(pid: str, story_slot, grid_slot, anim_enabled: bool = True):
         except TypeError:
             save_snapshot(pid, full, [], st.session_state["history"], username=username)
         # Show the death options panel and halt
-        # End the story when death occurs: mark it complete and show the standard conclusion panel
-        mark_story_complete()
-        render_end_options(pid, grid_slot)
+        render_death_options(pid, grid_slot)
         return
 
     # Beat progression (Story Mode only)
@@ -434,45 +534,23 @@ def onboarding(pid: str):
         st.session_state["is_generating"] = True
         st.rerun()
 
-# hydration function to run before main():
-def hydrate_once_for(pid: str) -> None:
-    """
-    Load the persisted scene/choices/history from storage on the first run.
-    Uses the pid (browser ID) to look up the last snapshot.
-    """
-    if st.session_state.get("_hydrated"):
-        return
-    st.session_state["_hydrated"] = True
-    try:
-        if has_snapshot(pid):
-            snap = load_snapshot(pid)
-            if snap:
-                st.session_state["scene"] = snap.get("scene", "")
-                st.session_state["choices"] = snap.get("choices", [])
-                st.session_state["history"] = snap.get("history", [])
-                # Restore player profile if not already set
-                if snap.get("username") and not st.session_state.get("player_name"):
-                    st.session_state["player_name"] = snap["username"]
-                if snap.get("gender") and not st.session_state.get("player_gender"):
-                    st.session_state["player_gender"] = snap["gender"]
-                if snap.get("archetype") and not st.session_state.get("player_archetype"):
-                    st.session_state["player_archetype"] = snap["archetype"]
-    except Exception:
-        pass
-
 # --------------------------
 # Main
 # --------------------------
 def main():
     st.set_page_config(page_title=APP_TITLE, page_icon="🕯️", layout="wide")
+
     inject_css()
     ensure_keys()
+
+    st.session_state.setdefault("scene_count", 0)
+    st.session_state.setdefault("simple_cyoa", True)
+    st.session_state.setdefault("auto_illustrate", True)
+    st.session_state.setdefault("last_illustration_url", None)
+
     init_db()
 
-    # Use a persistent browser ID instead of "local-user"
-    pid = ensure_browser_id()
-    # Load any persisted snapshot once per session
-    hydrate_once_for(pid)
+    pid = "local-user"  # simple identity; adjust as needed
 
     # Sidebar controls (render early)
     try:
@@ -493,11 +571,71 @@ def main():
         if st.session_state["_dev"]:
             # Show basic debug information
             beat = get_current_beat(st.session_state) if st.session_state.get("story_mode") else "classic"
+            illustration_text = st.session_state.get("last_illustration_url") or "None"
             st.caption(
                 f"Story Mode: {'on' if st.session_state.get('story_mode') else 'off'} • "
                 f"Beat: {beat} • Danger streak: {st.session_state.get('danger_streak', 0)} • "
-                f"Scenes: {len(st.session_state.get('history', []))}"
+                f"Scenes: {len(st.session_state.get('history', []))} • "
+                f"Illustration: {illustration_text} • "
+                f"Ill key: {st.session_state.get('ill_last_key','–')} • "
+                f"Auto: {st.session_state.get('auto_illustrate', True)} • "
+                f"Simple: {st.session_state.get('simple_cyoa', True)}"
             )
+            last_dbg = st.session_state.get("last_illustration_debug")
+            if last_dbg:
+                with st.expander("Illustration debug"):
+                    try:
+                        st.json(last_dbg)
+                    except Exception:
+                        st.write(last_dbg)
+
+        st.markdown("### Illustration")
+        simple_cyoa = st.checkbox("Simple CYOA style", value=True, help="Cleaner line art, minimal detail")
+        st.session_state["simple_cyoa"] = simple_cyoa
+        started_early = False
+        buffer = []
+
+        gen_click = st.button("Generate illustration for this scene", use_container_width=True, key="btn_gen_ill")
+        if gen_click:
+            scene_text = (st.session_state.get("scene") or "").strip()
+            if not scene_text:
+                st.warning("No scene text is available yet.")
+            else:
+                # ---- illustration cache (per scene + style) ----
+                ill_cache = st.session_state.setdefault("ill_cache", {})
+                import hashlib, json
+                cache_key = hashlib.md5(
+                    json.dumps({"scene": scene_text, "simple": bool(simple_cyoa)}, ensure_ascii=False).encode("utf-8")
+                ).hexdigest()
+
+                if cache_key in ill_cache:
+                    img_ref, dbg = ill_cache[cache_key]
+                else:
+                    with st.spinner("Creating illustration…"):
+                        res = generate_illustration(scene_text, simple=simple_cyoa)
+                    if isinstance(res, tuple) and len(res) == 2:
+                        img_ref, dbg = res
+                    else:
+                        img_ref, dbg = (res if res is not None else None), {}
+                    ill_cache[cache_key] = (img_ref, dbg)
+                # -----------------------------------------------
+
+                st.session_state["last_illustration_url"] = img_ref
+                st.session_state["last_illustration_debug"] = dbg
+                if img_ref:
+                    # The main render path should include:
+                    # illustration_ph.image(img_ref, caption="Illustration", use_container_width=True)
+                    try:
+                        st.toast("Illustration added.", icon="✨")
+                    except Exception:
+                        pass
+                else:
+                    st.warning("No illustration was returned.")
+                    try:
+                        st.json(dbg)
+                    except Exception:
+                        st.write(dbg)
+                st.rerun()
 
     # Handle sidebar actions
     if action == "start":
@@ -517,6 +655,7 @@ def main():
             st.session_state["story_complete"] = False
         st.session_state["pending_choice"] = "__start__"
         st.session_state["is_generating"] = True
+        st.session_state["scene_count"] = 0
         st.rerun()
     elif action == "reset":
         # Full reset (clear profile)
@@ -533,16 +672,66 @@ def main():
         st.rerun()
 
     # Fixed body slots
-    scene_ph   = st.empty()
+    scene_ph = st.empty()
+    illustration_ph = st.empty()   # <-- add this
     choices_ph = st.empty()
 
-    # Keep the storybox visible with the most recent scene
-    _last = st.session_state.get("scene")
-    if _last:
-        scene_ph.markdown(
-            f"<div class='storybox'>{_esc(_last).replace('\\n', ' ')}</div>",
-            unsafe_allow_html=True
-        )
+    def _poll_and_show_illustration(scene_text: str, simple: bool, ph):
+        # 1) Locate the job for THIS scene
+        key, job = _job_for_scene(scene_text, simple)
+
+        if not job:
+            # No job started (maybe early kickoff didn’t fire). Show status and optionally start now.
+            ph.caption("Illustration: no job yet.")
+            # Optional: if you want to force-start here when auto is ON:
+            if st.session_state.get("auto_illustrate", True):
+                seed = _has_first_sentence(scene_text) or " ".join(scene_text.split()[:18]) + "…"
+                if seed.strip():
+                    _start_illustration_job(seed, simple)
+                    ph.caption("Illustration: job started…")
+            return
+
+        fut = job["future"]
+        # 2) Collect result if done
+        if fut.done() and job["result"] is None:
+            try:
+                job["result"] = fut.result(timeout=0)
+            except Exception as e:
+                job["result"] = (None, {"error": repr(e)})
+
+        res = job.get("result")
+
+        # 3) Render according to state
+        if res:
+            img_ref, dbg = res if (isinstance(res, tuple) and len(res) == 2) else (res, {})
+            if img_ref:
+                st.session_state["last_illustration_url"]   = img_ref
+                st.session_state["last_illustration_debug"] = dbg
+                ph.image(img_ref, caption="Illustration", use_container_width=True)
+            else:
+                ph.caption("Illustration: unavailable (no image).")
+                try:
+                    with st.expander("Illustration debug"):
+                        st.json(dbg)
+                except Exception:
+                    pass
+        else:
+            # Still running
+            ph.caption("Illustration brewing…")
+            # Gentle refresh using streamlit-js-eval (if installed)
+            try:
+                from streamlit_js_eval import streamlit_js_eval
+                streamlit_js_eval(
+                    js_expressions="setTimeout(() => window.parent.location.reload(), 1000)",
+                    key=f"ill_poll_{key}"
+                )
+            except Exception:
+                # do nothing; it will show on the next natural rerun
+                pass
+
+
+    # Ensure state key exists
+    st.session_state.setdefault("last_illustration_url", None)
 
     # Pending work
     if st.session_state.get("pending_choice") is not None:
@@ -558,10 +747,19 @@ def main():
 
     # Render current scene and choices
     if st.session_state.get("scene"):
-        scene_ph.markdown(
-            f"<div class='storybox'>{_esc(st.session_state['scene']).replace('\\n',' ')}</div>",
-            unsafe_allow_html=True
-            )
+        # existing: show any previously saved image
+        if st.session_state.get("last_illustration_url"):
+            illustration_ph.image(st.session_state["last_illustration_url"], caption="", use_container_width=True)
+
+        scene_ph.markdown(st.session_state["scene"], unsafe_allow_html=True)
+
+        # POLL HERE on idle path (NOT in the pending path)
+        _poll_and_show_illustration(
+            st.session_state["scene"],
+            bool(st.session_state.get("simple_cyoa", True)),
+            illustration_ph,
+        )
+
     render_choices_grid(
         choices_ph,
         choices=st.session_state.get("choices", []),
