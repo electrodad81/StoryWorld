@@ -1,6 +1,5 @@
 # ui/anim.py
 from __future__ import annotations
-
 import streamlit as st
 
 def inject_css(enabled: bool = True) -> None:
@@ -10,125 +9,76 @@ def inject_css(enabled: bool = True) -> None:
         """
         <style>
         :root{
-          --ink:#e9e9f5;
-          --card:#12131b;
+          --ink:#2b2b2b;
+          --card:#ffffff;
           --ring:#f59e0b; /* warm lantern */
         }
 
-        /* Readable scene card (no overlay, no opacity tricks) */
+        /* Readable scene card */
         .scene-block{
           color:var(--ink);
           background:var(--card);
-          border:1px solid rgba(255,255,255,.08);
-          border-radius:14px;
-          padding:18px;
-          box-shadow:0 8px 18px rgba(0,0,0,.35);
-        }
-
-        /* Choices — neutral styling, no popups */
-        .choice-zone h3{ margin:0 0 8px 2px; color:#cfd0ff; font-weight:600; }
-        .choice-zone .stButton>button{
-          width:100%;
+          border:1px solid rgba(0,0,0,.08);
           border-radius:12px;
-          padding:12px 14px;
-          background:#171825;
-          color:var(--ink);
-          border:1px solid rgba(255,255,255,.08);
+          padding:18px;
+          box-shadow:0 8px 18px rgba(0,0,0,.05);
         }
 
-        .choice-zone .stButton>button:hover{
-          border-color:rgba(245,158,11,.65);
+        /* Story text wrapper used in the CENTER column only */
+        width: 80%;                 /* fill the story window */
+        max-width: none;             /* remove the old 760px clamp */
+        margin: 0;
+        padding: 1rem 1.25rem;
+        background:#fdf8f2;
+        color:#333;
+        border:1px solid #e8e0d3;
+        border-radius:4px;
+        box-shadow:0 1px 1px rgba(0,0,0,.05);
+        font-family: "Times New Roman", serif;
+        font-size: 1.1rem;
+        line-height: 1.6;
         }
 
-        /* Tiny pulsing lantern used while choices are computed */
-        .lantern{
-          display:inline-flex; align-items:center; gap:8px;
-          color:#ffeab6; font-weight:600;
+        /* Choice buttons */
+        .stButton>button {
+          background: #f6f4e9;
+          color: #333333;
+          border: 1px solid #c8c8c8;
+          border-radius: 8px;
+          padding: 10px 16px;
+          font-family: "Times New Roman", serif;
         }
+        .stButton>button:hover { background:#eee9d9; border-color:#b8b8b8; }
 
+        /* Lantern pulse (used while choices are being generated) */
+        .lantern{ display:inline-flex; align-items:center; gap:8px; color:#7a5a00; font-weight:600; }
         .lantern .bulb{
           width:10px; height:10px; border-radius:50%;
           background:#fcd34d;
           box-shadow:0 0 8px #f59e0b, 0 0 16px rgba(245,158,11,.8);
           animation:lanternPulse 1.1s ease-in-out infinite;
         }
-
         @keyframes lanternPulse{
           0%,100%{ transform:scale(.95); box-shadow:0 0 6px #f59e0b, 0 0 12px rgba(245,158,11,.5) }
           50%     { transform:scale(1.05); box-shadow:0 0 12px #f59e0b, 0 0 28px rgba(245,158,11,.9) }
         }
+        @media (prefers-reduced-motion: reduce){ *{ animation:none !important; transition:none !important } }
 
-        /* Respect reduced motion */
-        @media (prefers-reduced-motion: reduce){
-          *{ animation:none !important; transition:none !important }
-        }
-
-        /* A fixed story container for streaming text */
-        .storybox {
-            max-width: 750;
-            margin-left: auto;
-            margin-right: auto;
-            padding: 1.5rem;
-            min-height: 30rem;  /* adjust height as desired */
-            background: #fdf8f2;
-            color: #333333;
-            border: 1px solid #d8d8d8;
-            border-radius: 4px;
-            box-shadow: 0 2px 2px rgba(0,0,0,.35);
-            font-family: "Times New Roman", serif;
-            font-size: 1.1rem;
-            line-height: 1.6;
-        }
-
-        /* Book‑like buttons for choices and actions */
-        .stButton>button {
-            background: #f6f4e9;
-            color: #333333;
-            border: 1px solid #c8c8c8;
-            border-radius: 6px;
-            padding: 10px 16px;
-            font-family: "Times New Roman", serif;
-        }
-        .stButton>button:hover {
-            background: #eee9d9;
-            border-color: #b8b8b8;
-        }
-
-        /* Constrain the app’s main content to the same width as the story box */
-        div.block-container {
-            max-width: 750px;
-            margin-left: auto;
-            margin-right: auto;
-        }
-
-        .choice-zone {
-            /* optional: could further style the choices area if you wrap it in this class */
-        }
-
+        /* IMPORTANT: DO NOT clamp or center the whole app.
+           (This was causing the large gap + tiny right column.) */
+        /* -- removed your global block-container width rules -- */
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 def render_scene(container, markdown_text: str) -> None:
-    """Write the scene into a readable card (no overlays)."""
     container.markdown(f'<div class="scene-block">{markdown_text}</div>', unsafe_allow_html=True)
 
 def render_thinking(choices_container) -> None:
-    """Show the lantern pulse while choices are being generated."""
     with choices_container:
         st.markdown(
             '<div class="lantern"><span class="bulb"></span>'
             '<span>The lantern glows while choices take shape…</span></div>',
             unsafe_allow_html=True,
         )
-
-def render_choices(choices: list[str], choices_container, turn_id: int) -> None:
-    """Render two buttons in-place (no duplicate scenes, no popups)."""
-    with choices_container:
-        st.markdown('<div class="choice-zone"><h3>Your choices</h3></div>', unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        if len(choices) >= 1 and c1.button(choices[0], key=f"c1_{turn_id}", use_container_width=True):
-            st.session_state["_picked"] = choices[0]
-        if len(choices) >= 2 and c2.button(choices[1], key=f"c2_{turn_id}", use_container_width=True):
-            st.session_state["_picked"] = choices[1]
