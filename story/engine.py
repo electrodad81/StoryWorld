@@ -31,10 +31,10 @@ def generate_illustration(scene: str, simple: bool = True) -> Tuple[Optional[str
     # Two prompt styles: "simple" for CYOA-like line art, "detailed" as fallback
     if simple:
         style_prompt = (
-            "Simple, clean black-and-white line art. Minimal hatching, clear contours, "
+            "Simple, clean black-and-white line art with a single blue highlight. Minimal hatching, clear contours, "
             "single focal subject, medium or close-up shot. Lighthearted adventure tone. "
             "the background behind the image subject should be plain white, "
-            "lightly intricate textures, heavy crosshatching, or gore."
+            "lightly intricate textures, careful crosshatching, no gore. " 
         )
     else:
         style_prompt = (
@@ -98,9 +98,9 @@ def stream_scene(history: List[Dict[str, str]],
     """
     # System prompt: style and constraints with consequence contract
     sys = (
-        "You are the narrative engine for a PG-13 dark-fantasy interactive story called Gloamreach.\n"
+        "You are the narrative engine for a PG dark-fantasy interactive story called Gloamreach.\n"
         "Write in present tense, second person. Do not name the protagonist; if a Name exists, it may appear only in NPC dialogue.\n"
-        "Keep prose tight by default (~85–120 words). Maintain continuity with prior scenes.\n"
+        "Keep prose tight by default (~85–150 words single paragraph). Maintain continuity with prior scenes.\n"
         # Consequence contract ensures risky choices have visible costs and escalating setbacks
         "Consequence contract: If the last player choice was risky, show a visible cost in THIS scene (wound, gear loss, time pressure, ally setback, exposure to threat). Do NOT undo it immediately. "
         "If the player chose risky paths in two consecutive scenes, escalate to a serious setback (capture, grave wound, loss). Only when fictionally fitting, you may kill the protagonist.\n"
@@ -160,8 +160,8 @@ def stream_scene(history: List[Dict[str, str]],
         "Player history (latest last):\n"
         f"{_history_text(history)}\n\n"
         # Guidance on output format
-        "Output exactly one paragraph in second person, present tense.\n"
-        "Length: ~85–120 words. End cleanly; do not start a new paragraph."
+        "Output text in second person, present tense.\n"
+        "Length: ~85–150 words. End cleanly; do not start a new paragraph."
     )
 
     # Streaming call
