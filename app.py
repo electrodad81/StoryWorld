@@ -299,6 +299,26 @@ def render_persistent_illustration(illus_ph, scene_text: str):
                 except Exception:
                     pass
                 url = img_ref
+            else:
+                # ---------- NEW: show error instead of spinning forever ----------
+                err = (dbg or {}).get("error") if isinstance(dbg, dict) else None
+                if err:
+                    illus_ph.markdown(
+                        f"""
+                        <div class="illus-inline illus-skeleton">
+                          <div class="illus-status">Illustration failed.</div>
+                          <div class="illus-status" style="opacity:.75; font-size:.85rem; margin-top:.35rem;">
+                            <code>{err}</code>
+                          </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                    return
+                # -----------------------------------------------------------------
+                # No URL and no explicit error: keep skeleton only if we've never shown any image
+                if not url:
+                    status_text = "Illustration unavailable."
         else:
             # Job still running → KEEP current image; only show skeleton if we had none
             if not url:

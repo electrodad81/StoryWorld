@@ -1,28 +1,23 @@
 # core/identity.py
-import streamlit as st
-from streamlit_js_eval import streamlit_js_eval
 from typing import Optional
-
-_LS_KEY = "browser_id_v1"
-
-import uuid
-
-# core/identity.py
 import uuid
 import streamlit as st
 
+# Optional helper: only present if the component is installed
 try:
-    from streamlit_js_eval import streamlit_js_eval
+    from streamlit_js_eval import streamlit_js_eval  # type: ignore
 except Exception:
-    streamlit_js_eval = None
+    streamlit_js_eval = None  # graceful fallback when unavailable
 
 _COOKIE = "storyworld_pid"
 _LS_KEY = "storyworld_browser_id"
 
+
 def _pin_pid_in_url(pid: str) -> None:
+    """Ensure ?pid=... is present in the URL without reloading."""
     if not pid:
         return
-    # Prefer JS replaceState (no reload)
+    # Prefer JS replaceState for hosted reliability
     if streamlit_js_eval:
         try:
             streamlit_js_eval(
@@ -39,7 +34,7 @@ def _pin_pid_in_url(pid: str) -> None:
             return
         except Exception:
             pass
-    # Fallback to Streamlit API
+    # Fallback to Streamlit API (works locally, best-effort hosted)
     try:
         if hasattr(st, "query_params"):
             st.query_params.update({"pid": pid})
@@ -50,41 +45,45 @@ def _pin_pid_in_url(pid: str) -> None:
     except Exception:
         pass
 
+
 def _read_cookie(name: str) -> Optional[str]:
+    """Read a cookie value via JS; None if not available."""
+    if not streamlit_js_eval:
+        return None
     try:
-        from streamlit_js_eval import streamlit_js_eval
         raw = streamlit_js_eval(js_expressions="document.cookie", key="read_cookie")
         if isinstance(raw, str):
-            parts = [p.strip() for p in raw.split(";")]
-            for p in parts:
-                if p.startswith(name + "="):
-                    return p[len(name) + 1:]
+            for part in (p.strip() for p in raw.split(";")):
+                if part.startswith(name + "="):
+                    return part[len(name) + 1 :]
     except Exception:
         pass
     return None
 
+
 def _write_cookie(name: str, value: str, days: int = 365) -> None:
+    """Write a simple cookie via JS; no-op if JS helper missing."""
+    if not streamlit_js_eval:
+        return
     try:
-        from streamlit_js_eval import streamlit_js_eval
         streamlit_js_eval(
-            js_expressions=(
-                f"document.cookie = '{name}={value};path=/;max-age={days*24*3600}';"
-            ),
-            key="write_cookie",
+            js_expressions=f"document.cookie='{name}={value};path=/;max-age={days*24*3600}';",
+            key=f"write_cookie_{name}",
         )
     except Exception:
         pass
 
+
 def ensure_browser_id(store_key: str = _LS_KEY) -> str:
     """
-    Stable per-browser id with multiple anchors:
-    1) st.session_state['browser_id']
-    2) ?pid= in URL
-    3) localStorage
-    4) cookie
-    5) generate new → write (2)(3)(4) → one-time rerun
+    Stable per-browser id with multiple anchors, in order:
+      1) st.session_state['browser_id']
+      2) URL ?pid=...
+      3) window.localStorage[store_key]
+      4) cookie
+      5) generate new → mirror to (2)(3)(4) → one-time rerun
     """
-    # 1) session
+    # 1) Session
     if st.session_state.get("browser_id"):
         return st.session_state["browser_id"]
 
@@ -95,8 +94,7 @@ def ensure_browser_id(store_key: str = _LS_KEY) -> str:
         url_pid = v[0] if isinstance(v, list) else v
         if url_pid:
             st.session_state["browser_id"] = url_pid
-            # mirror everywhere
-            _pin_pid_in_url(url_pid)
+            _pin_pid_in_url(url_pid)       # keep URL canonical
             _write_cookie(_COOKIE, url_pid)
             if streamlit_js_eval:
                 try:
@@ -110,22 +108,22 @@ def ensure_browser_id(store_key: str = _LS_KEY) -> str:
     except Exception:
         pass
 
-    # 3) localStorage  (FIX: use `bid`, not `url_pid`)
+    # 3) localStorage
     try:
+        ls = None
         if streamlit_js_eval:
             ls = streamlit_js_eval(
                 js_expressions=f"localStorage.getItem('{store_key}')",
                 key="read_ls_pid",
             )
-        else:
-            ls = None
         if isinstance(ls, str) and ls.strip():
             bid = ls.strip()
             st.session_state["browser_id"] = bid
-            _pin_pid_in_url(bid)          # <-- put it in the URL
-            _write_cookie(_COOKIE, bid)   # <-- FIXED: was url_pid
+            _pin_pid_in_url(bid)          # mirror to URL
+            _write_cookie(_COOKIE, bid)   # ← FIX: use `bid` (not `url_pid`)
             if streamlit_js_eval:
                 try:
+                    # echo back to ensure LS is stable across subpaths/origins
                     streamlit_js_eval(
                         js_expressions=f"localStorage.setItem('{store_key}', '{bid}')",
                         key="echo_ls_pid",
@@ -151,7 +149,7 @@ def ensure_browser_id(store_key: str = _LS_KEY) -> str:
                 pass
         return cookie_pid
 
-    # 5) generate new (one-time wait)
+    # 5) generate new (but first: give JS one render to initialize)
     if not st.session_state.get("_pid_waited_once"):
         st.session_state["_pid_waited_once"] = True
         (getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None))()
@@ -170,20 +168,23 @@ def ensure_browser_id(store_key: str = _LS_KEY) -> str:
         except Exception:
             pass
 
-    # one-time bootstrap rerun
+    # one-time bootstrap rerun so subsequent code sees a stable PID
     if not st.session_state.get("_pid_bootstrapped"):
         st.session_state["_pid_bootstrapped"] = True
         (getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None))()
     return bid
 
+
 def clear_browser_id_and_reload():
-    """Delete the id from localStorage and reload the page."""
+    """Delete the id from localStorage and reload the page (best-effort)."""
+    if not streamlit_js_eval:
+        return
     streamlit_js_eval(
         js_expressions=f"""
-            (function(){{
-                window.localStorage.removeItem({_LS_KEY!r});
+            (() => {{
+                try {{ window.localStorage.removeItem({_LS_KEY!r}); }} catch (e) {{}}
                 window.location.reload();
-            }})();
+            }})()
         """,
         key="clear_browser_id",
     )
