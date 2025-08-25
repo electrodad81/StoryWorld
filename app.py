@@ -111,6 +111,55 @@ def _gentle_autorefresh_if_pending(job_key: Optional[str], delay: float = 0.7, m
     time.sleep(delay)
     _soft_rerun()
 
+def render_persistent_illustration(illus_ph, scene_text: str):
+    """
+    Keep the currently displayed image on-screen while a new job is pending.
+    Only swap to the new image when it is ready. If we’ve never shown any image,
+    display a small skeleton during the first-ever generation.
+    """
+    simple_flag = bool(st.session_state.get("simple_cyoa", True))
+    url = st.session_state.get("display_illustration_url")  # what is currently shown
+    status_text = ""
+    pending_key_for_refresh = None
+
+    key, job = _job_for_scene(scene_text or "", simple_flag)
+
+    if job:
+        fut = job["future"]
+        if fut.done() and job.get("result") is None:
+            try:
+                job["result"] = fut.result(timeout=0)
+            except Exception as e:
+                job["result"] = (None, {"error": repr(e)})
+
+        res = job.get("result")
+        if res is not None:
+            img_ref, dbg = res if (isinstance(res, tuple) and len(res) == 2) else (res, {})
+            if img_ref:
+                st.session_state["display_illustration_url"] = img_ref  # atomic swap
+                st.session_state["last_illustration_debug"] = dbg
+                url = img_ref
+        else:
+            # Job still running → KEEP current image; only show skeleton if we had none
+            if not url:
+                status_text = "Illustration brewing…"
+            pending_key_for_refresh = key
+
+    # Draw: keep current image if any; skeleton only when we have none
+    if url:
+        illus_ph.markdown(
+            f'<div class="illus-inline"><img src="{url}" alt="illustration"/></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        illus_ph.markdown(
+            f'<div class="illus-inline illus-skeleton"><div class="illus-status">{status_text or "Illustration brewing…"}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    # Schedule rerun *after* choices are already rendered elsewhere
+    _gentle_autorefresh_if_pending(pending_key_for_refresh)
+
 # =============================================================================
 # Lore / constants
 # =============================================================================
@@ -208,11 +257,12 @@ def ensure_keys():
     st.session_state.setdefault("story_complete",False)
     st.session_state.setdefault("_dev",False)
     st.session_state.setdefault("_beat_scene_count",0)
-    st.session_state.setdefault("last_illustration_url",None)
     st.session_state.setdefault("onboard_dismissed", False)
     st.session_state.setdefault("scene_count", 0)
     st.session_state.setdefault("simple_cyoa", True)   # no sidebar control
     st.session_state.setdefault("auto_illustrate", True)
+    # --- persistent illustration buffer ---
+    st.session_state.setdefault("display_illustration_url", None)
 
 def reset_session(full_reset=False):
     keep={}
@@ -222,6 +272,8 @@ def reset_session(full_reset=False):
         keep["player_archetype"]=st.session_state.get("player_archetype","Default")
         keep["story_mode"]=bool(st.session_state.get("story_mode",False))
         keep["onboard_dismissed"]=True
+        # keep the last shown illustration if you want it across hard resets:
+        # keep["display_illustration_url"]=st.session_state.get("display_illustration_url")
     for k in list(st.session_state.keys()):
         del st.session_state[k]
     ensure_keys()
@@ -239,7 +291,8 @@ def mark_story_complete(): st.session_state["story_complete"]=True
 def is_story_complete(state)->bool: return bool(state.get("story_complete",False))
 
 # =============================================================================
-# Advance turn: stream text → (separator + art slot / persist) → choices
+# Advance turn: stream text → (separator) → start job (maybe) → choices
+# (illustration itself is rendered in the regular render path to avoid flicker)
 # =============================================================================
 def _advance_turn(pid: str, story_slot, sep_slot, illus_slot, grid_slot, anim_enabled: bool=True):
     old_choices=list(st.session_state.get("choices",[]))
@@ -286,29 +339,15 @@ def _advance_turn(pid: str, story_slot, sep_slot, illus_slot, grid_slot, anim_en
     st.session_state["history"].append({"role":"assistant","content":full})
     scene_index = st.session_state.get("scene_count", 0) + 1
 
-    # separator
+    # separator under the text
     _render_separator(sep_slot)
 
-    last_url = st.session_state.get("last_illustration_url")
-
-    # decide whether this scene requests a NEW illustration
+    # decide whether this scene requests a NEW illustration; do NOT clear current display
     should_illustrate = ((scene_index - ILLUSTRATION_PHASE) % ILLUSTRATION_EVERY_N == 0)
-
-    # show illustration slot:
-    # - if NEW art is requested: show skeleton (and start job)
-    # - otherwise: persist last image if available; else keep slot empty
     if should_illustrate and st.session_state.get("auto_illustrate", True):
-        _render_illustration_inline(illus_slot, None, "Illustration brewing…")
-        seed=_has_first_sentence(full) or " ".join(full.split()[:18]) + "…"
+        seed = _has_first_sentence(full) or " ".join(full.split()[:18]) + "…"
         if seed.strip():
             _start_illustration_job(seed, bool(st.session_state.get("simple_cyoa", True)))
-
-    # If we already have an image, keep showing it; only show a skeleton if we have nothing yet.
-    if last_url:
-        _render_illustration_inline(illus_slot, last_url)
-    else:
-        # First ever scene (no image yet) → show a small skeleton card
-        _render_illustration_inline(illus_slot, None, "Illustration brewing…")
 
     # choices (visible immediately)
     choices=generate_choices(st.session_state["history"],full,LORE)
@@ -388,33 +427,27 @@ def main():
     # --- Book-like type; narrower main, added RIGHT margin via container max-width ---
     st.markdown("""
     <style>
-        /* Narrow the main container so there's a right-side margin on large screens.
-            This also indirectly constrains the illustration width. */
         [data-testid="stAppViewContainer"] > .main .block-container{
-        max-width: 1040px !important;      /* was 100% */
-        padding-left: .35rem !important;
-        padding-right: 10rem !important;    /* a bit more right padding */
-        margin-left: auto; margin-right: auto; /* keep it tidy */
+          max-width: 1040px !important;
+          padding-left: .35rem !important;
+          padding-right: 10rem !important;
+          margin-left: auto; margin-right: auto;
         }
-
         :root{
-        --story-max: 680px;      /* novel-like measure */
-        --choices-h: 120px;
+          --story-max: 680px;
+          --choices-h: 120px;
         }
-
-        /* Keep the center stack narrow like a book */
         [data-testid="stVerticalBlock"] > div:has(> div.story-window){
-        width: 100% !important;
-        max-width: var(--story-max) !important;
-        margin-left: 0 !important;
-        margin-right: auto !important;   /* leaves visible space on the right */
+          width: 100% !important;
+          max-width: var(--story-max) !important;
+          margin-left: 0 !important;
+          margin-right: auto !important;
         }
-
         .story-window{ width:100%; margin: .2rem 0 .25rem 0; }
         .storybox{
-        font-family: "Georgia","Garamond","Times New Roman",serif;
-        font-size: 1.5rem; line-height: 1.75; letter-spacing: .005em;
-        text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased;
+          font-family: "Georgia","Garamond","Times New Roman",serif;
+          font-size: 1.5rem; line-height: 1.75; letter-spacing: .005em;
+          text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased;
         }
         .storybox p{ margin: 0 0 .95rem 0; }
         .storybox p + p{ text-indent: 1.25em; }
@@ -423,47 +456,40 @@ def main():
         .illus-sep .line{ flex:1; height:1px; background:linear-gradient(90deg,rgba(0,0,0,0),rgba(0,0,0,.28),rgba(0,0,0,0)); }
         .illus-sep .gem{ font-size:.8rem; opacity:.6; line-height:1; }
 
-        /* Illustration takes full story width; no fixed min-height, so it can
-            expand into the whitespace directly under the text. */
         .illus-inline{
-        width: auto;                         /* allow side margins */
-        max-width: calc(100% - 10rem);        /* 1rem left + 1rem right */
-        margin: .6rem 1rem 1.4rem 1rem;      /* top | right | bottom | left */
-        background: var(--secondary-background-color);
-        border: 1px solid rgba(49,51,63,.18);
-        border-radius: 6px;
-        padding: .55rem;
-        box-shadow: 0 1px 2px rgba(0,0,0,.05);
-        display:flex; align-items:center; justify-content:center;
+          width: auto;
+          max-width: calc(100% - 10rem);
+          margin: .6rem 1rem 1.4rem 1rem;
+          background: var(--secondary-background-color);
+          border: 1px solid rgba(49,51,63,.18);
+          border-radius: 6px;
+          padding: .55rem;
+          box-shadow: 0 1px 2px rgba(0,0,0,.05);
+          display:flex; align-items:center; justify-content:center;
         }
         .illus-inline img{ width:100%; height:auto; border-radius:8px; display:block; object-fit:contain; }
         .illus-inline .illus-status{ font-size:.95rem; opacity:.75; }
         .illus-skeleton{
-        min-height: 220px;
-        background: linear-gradient(90deg, rgba(0,0,0,.05) 25%, rgba(0,0,0,.08) 37%, rgba(0,0,0,.05) 63%);
-        background-size: 400% 100%; animation: shimmer 1.2s ease-in-out infinite;
+          min-height: 220px;
+          background: linear-gradient(90deg, rgba(0,0,0,.05) 25%, rgba(0,0,0,.08) 37%, rgba(0,0,0,.05) 63%);
+          background-size: 400% 100%; animation: shimmer 1.2s ease-in-out infinite;
         }
         @keyframes shimmer{ 0%{background-position:100% 0} 100%{background-position:-100% 0} }
 
         .choices-band{ width:100%; min-height: var(--choices-h); }
-                
-        /* Onboarding card: margin + padding + subtle frame */
+
         .onboard-panel{
-        max-width: 640px;
-        margin: 0.5rem auto 1.25rem auto;  /* top | right/left (auto center) | bottom */
-        padding: 1rem 1.25rem;
-        background: var(--secondary-background-color);
-        border: 1px solid rgba(49,51,63,.18);
-        border-radius: 12px;
-        box-shadow: 0 1px 2px rgba(0,0,0,.05);
+          max-width: 640px;
+          margin: 0.5rem auto 1.25rem auto;
+          padding: 1rem 1.25rem;
+          background: var(--secondary-background-color);
+          border: 1px solid rgba(49,51,63,.18);
+          border-radius: 12px;
+          box-shadow: 0 1px 2px rgba(0,0,0,.05);
         }
-        .onboard-panel h1, .onboard-panel h2, .onboard-panel h3{
-        margin-top: .2rem; margin-bottom: .6rem;
-        }
-        .onboard-panel [data-testid="column"]{
-        gap: .5rem;
-        }
-        </style>
+        .onboard-panel h1, .onboard-panel h2, .onboard-panel h3{ margin-top: .2rem; margin-bottom: .6rem; }
+        .onboard-panel [data-testid="column"]{ gap: .5rem; }
+    </style>
     """, unsafe_allow_html=True)
 
     # Sidebar (no illustration controls)
@@ -502,11 +528,11 @@ def main():
             st.session_state.pop(k, None)
         _soft_rerun()
 
-    # Main stack: story → separator → illustration slot (persist/new) → choices
-    story_ph = st.empty()
-    sep_ph   = st.empty()
-    illus_ph = st.empty()
-    choices_ph = st.empty()
+    # Placeholders in visual order: story → sep → illustration → choices
+    story_ph  = st.empty()
+    sep_ph    = st.empty()
+    illus_ph  = st.empty()     # restored
+    choices_ph= st.empty()
 
     # queued turn?
     if st.session_state.get("pending_choice") is not None:
@@ -533,37 +559,7 @@ def main():
                       unsafe_allow_html=True)
     _render_separator(sep_ph)
 
-    # illustration: if a job is pending, we’ll swap in place when it finishes;
-    # otherwise we just keep whatever last image we have.
-    pending_key_for_refresh = None
-    url = st.session_state.get("last_illustration_url")
-    status_text = ""
-
-    simple_flag = bool(st.session_state.get("simple_cyoa", True))
-    key, job = _job_for_scene(st.session_state.get("scene",""), simple_flag)
-
-    if job:
-        fut = job["future"]
-        if fut.done() and job.get("result") is None:
-            try:
-                job["result"] = fut.result(timeout=0)
-            except Exception as e:
-                job["result"] = (None, {"error": repr(e)})
-
-        res = job.get("result")
-        if res is not None:
-            img_ref, dbg = res if (isinstance(res, tuple) and len(res) == 2) else (res, {})
-            st.session_state["last_illustration_url"]  = img_ref
-            st.session_state["last_illustration_debug"] = dbg
-            url = img_ref
-        else:
-            # Job still running: keep showing the current image if we have one.
-            # Only show a skeleton if we have no image yet.
-            if not url:
-                status_text = "Illustration brewing…"
-            pending_key_for_refresh = key
-
-    # choices (always present)
+    # Render choices NOW so they remain visible during any gentle reruns
     choices_ph.markdown('<div class="choices-band"></div>', unsafe_allow_html=True)
     render_choices_grid(choices_ph,
                         choices=st.session_state.get("choices", []),
@@ -571,11 +567,8 @@ def main():
                         count=CHOICE_COUNT)
     st.session_state["t_choices_visible_at"] = time.time()
 
-    # Render: persist current image, or skeleton only when we have none.
-    _render_illustration_inline(illus_ph, url, status_text)
-
-    # Ask for a gentle rerun *after* choices are on-screen
-    _gentle_autorefresh_if_pending(pending_key_for_refresh)
+    # Then render illustration into its placeholder; helper will schedule a rerun if needed.
+    render_persistent_illustration(illus_ph, st.session_state.get("scene",""))
 
 if __name__ == "__main__":
     main()
