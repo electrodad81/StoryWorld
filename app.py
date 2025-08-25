@@ -47,30 +47,35 @@ DEV_UI_ALLOWED = _to_bool(
 )
 
 def resolve_pid() -> str:
-    """Stable per-browser id via localStorage; fallback to env/query/local-user."""
+    """
+    Resolve a stable per-browser PID via identity.ensure_browser_id().
+    Avoid generating alternates unless absolutely necessary.
+    """
+    # If already resolved this run, return it
     if st.session_state.get("pid"):
         return st.session_state["pid"]
 
-    pid = None
+    # Ask identity helper (handles URL/localStorage/bootstrap)
     try:
-        pid = ensure_browser_id()  # uses localStorage
+        bid = ensure_browser_id()
     except Exception:
-        pid = None
+        bid = None
 
-    if not pid:
-        try:
-            qp = st.query_params if hasattr(st, "query_params") else st.experimental_get_query_params()
-            v = qp.get("pid")
-            pid = v[0] if isinstance(v, list) else v
-        except Exception:
-            pass
+    # Final fallback only if everything else failed
+    if not bid:
+        import uuid
+        bid = "brw-" + uuid.uuid4().hex
 
-    if not pid:
-        pid = os.environ.get("PID") or os.environ.get("USER_ID") \
-              or os.environ.get("USER") or os.environ.get("USERNAME") \
-              or "local-user"
+    st.session_state["pid"] = str(bid)
 
-    st.session_state["pid"] = str(pid)
+    # Mirror into URL for refresh survival (no-op if already set)
+    try:
+        cur = dict(getattr(st, "query_params", {}))
+        if cur.get("pid") != st.session_state["pid"]:
+            st.query_params = {**cur, "pid": st.session_state["pid"]}
+    except Exception:
+        pass
+
     return st.session_state["pid"]
 
 def _maybe_restore_from_snapshot(pid: str) -> bool:
@@ -98,6 +103,11 @@ def _maybe_restore_from_snapshot(pid: str) -> bool:
     st.session_state["choices"] = snap.get("choices") or []
     st.session_state["history"] = snap.get("history") or []
 
+    img = snap.get("last_illustration_url")
+    if img:
+        st.session_state["display_illustration_url"] = img
+        st.session_state["last_illustration_url"]   = img
+
     # Player profile (so onboarding won’t show)
     st.session_state["player_name"]      = snap.get("username") or st.session_state.get("player_name")
     st.session_state["player_gender"]    = snap.get("gender")    or st.session_state.get("player_gender", "Unspecified")
@@ -113,9 +123,27 @@ def _maybe_restore_from_snapshot(pid: str) -> bool:
 # =============================================================================
 # Illustration helpers
 # =============================================================================
+
+from typing import Dict
+
+@st.cache_resource
+def _illustration_store() -> Dict[str, str]:
+    """Process-wide cache mapping scene-key → image URL."""
+    return {}
+
 @st.cache_resource
 def _ill_executor() -> ThreadPoolExecutor:
     return ThreadPoolExecutor(max_workers=2)
+
+from typing import List
+def _scene_keys_for(scene_text: str, simple: bool) -> List[str]:
+    txt = (scene_text or "").strip()
+    keys = []
+    first = _has_first_sentence(txt)
+    if first:
+        keys.append(_scene_key(first, simple))
+    keys.append(_scene_key(txt, simple))  # always include full-scene as fallback
+    return keys
 
 def _has_first_sentence(txt: str) -> Optional[str]:
     m = re.search(r"(.+?[.!?])(\s|$)", txt or "")
@@ -185,8 +213,17 @@ def render_persistent_illustration(illus_ph, scene_text: str):
         if res is not None:
             img_ref, dbg = res if (isinstance(res, tuple) and len(res) == 2) else (res, {})
             if img_ref:
-                st.session_state["display_illustration_url"] = img_ref  # atomic swap
+                st.session_state["display_illustration_url"] = img_ref
+                st.session_state["last_illustration_url"] = img_ref
                 st.session_state["last_illustration_debug"] = dbg
+                
+                # NEW: cache by deterministic key so refresh can restore it
+                try:
+                    store = _illustration_store()
+                    store[_scene_key(seed_sentence := ( _has_first_sentence(scene_text) or scene_text ), 
+                                     bool(st.session_state.get("simple_cyoa", True)))] = img_ref
+                except Exception:
+                    pass
                 url = img_ref
         else:
             # Job still running → KEEP current image; only show skeleton if we had none
@@ -417,6 +454,8 @@ def _advance_turn(pid: str, story_slot, sep_slot, illus_slot, grid_slot, anim_en
     gender   = st.session_state.get("player_gender")
     arch     = st.session_state.get("player_archetype")
 
+    last_img = st.session_state.get("last_illustration_url")
+
     # Try kwargs first (newer store signatures), then positional (older).
     try:
         save_snapshot(
@@ -424,13 +463,15 @@ def _advance_turn(pid: str, story_slot, sep_slot, illus_slot, grid_slot, anim_en
             scene=full,
             choices=choices,
             history=st.session_state.get("history", []),
-            username=username,
-            gender=gender,
-            archetype=arch,
+            username=st.session_state.get("player_name"),
+            gender=st.session_state.get("player_gender"),
+            archetype=st.session_state.get("player_archetype"),
+            last_illustration_url=last_img,              # <-- NEW
         )
     except TypeError:
-        # Older signature: (user_id, scene, choices, history, username=None, gender=None, archetype=None)
-        save_snapshot(pid, full, choices, st.session_state.get("history", []), username, gender, arch)
+        # older store.py without the new param – fall back silently
+        save_snapshot(pid, full, choices, st.session_state["history"],
+                    username=st.session_state.get("player_name"))
 
 
     st.session_state["scene_count"] = scene_index
@@ -574,7 +615,7 @@ def main():
         else:
             st.session_state["_dev"] = False
         if st.session_state.get("_dev"):
-            
+
             now = time.time()
 
             try:
@@ -765,6 +806,19 @@ def main():
                         generating=False,
                         count=CHOICE_COUNT)
     st.session_state["t_choices_visible_at"] = time.time()
+
+    if not st.session_state.get("display_illustration_url"):
+        try:
+            store = _illustration_store()
+            simple_flag = bool(st.session_state.get("simple_cyoa", True))
+            for k in _scene_keys_for(st.session_state.get("scene",""), simple_flag):
+                cached_url = store.get(k)
+                if cached_url:
+                    st.session_state["display_illustration_url"] = cached_url
+                    st.session_state["last_illustration_url"]   = cached_url
+                    break
+        except Exception:
+            pass
 
     # Then render illustration into its placeholder; helper will schedule a rerun if needed.
     render_persistent_illustration(illus_ph, st.session_state.get("scene",""))

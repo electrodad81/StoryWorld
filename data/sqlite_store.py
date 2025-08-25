@@ -47,6 +47,13 @@ def init_db():
           username        TEXT
         );
         """)
+
+        # inside init_db(), after creating story_progress:
+        conn.execute("""
+        ALTER TABLE story_progress
+        ADD COLUMN IF NOT EXISTS last_illustration_url TEXT
+        """)
+
         # Backfill columns if missing
         if not _column_exists(conn, "story_progress", "decisions_count"):
             conn.execute("ALTER TABLE story_progress ADD COLUMN decisions_count INTEGER NOT NULL DEFAULT 0;")

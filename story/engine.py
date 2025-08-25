@@ -31,7 +31,7 @@ def generate_illustration(scene: str, simple: bool = True) -> Tuple[Optional[str
     # Two prompt styles: "simple" for CYOA-like line art, "detailed" as fallback
     if simple:
         style_prompt = (
-            "Simple, clean black-and-white line art with a single blue highlight. Minimal hatching, clear contours, "
+            "Simple, clean black-and-white line-and-wash with a single colored highlight. Minimal hatching, clear contours, "
             "single focal subject, medium or close-up shot. Lighthearted adventure tone. "
             "the background behind the image subject should be plain white, "
             "lightly intricate textures, careful crosshatching, no gore. " 

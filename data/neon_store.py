@@ -67,6 +67,12 @@ def init_db():
         ADD COLUMN IF NOT EXISTS username TEXT
         """)    
 
+        # inside init_db(), after creating story_progress:
+        cur.execute("""
+        ALTER TABLE story_progress
+        ADD COLUMN IF NOT EXISTS last_illustration_url TEXT
+        """)
+
         # Backfill for older deployments
         cur.execute("""
           ALTER TABLE public.story_progress
