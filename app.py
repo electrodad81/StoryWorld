@@ -3,6 +3,8 @@ import os, time, json, hashlib, re, pathlib
 from typing import Optional
 import streamlit as st
 
+from core.identity import ensure_browser_id
+
 # --- UI helpers you already have ---
 from ui.anim import inject_css
 from ui.choices import render_choices_grid
@@ -39,27 +41,74 @@ def _from_secrets_or_env(*keys, default=None):
             return os.environ[k]
     return default
 
-DEV_UI_ALLOWED = _to_bool(_from_secrets_or_env("dev_ui","DEV_UI","show_dev","SHOW_DEV"), default=False)
+DEV_UI_ALLOWED = _to_bool(
+    _from_secrets_or_env("DEBUG_UI", "dev_ui", "DEV_UI", "show_dev", "SHOW_DEV"),
+    default=False,
+)
 
 def resolve_pid() -> str:
-    if "pid" in st.session_state and st.session_state["pid"]:
+    """Stable per-browser id via localStorage; fallback to env/query/local-user."""
+    if st.session_state.get("pid"):
         return st.session_state["pid"]
+
+    pid = None
     try:
-        qp = st.query_params if hasattr(st, "query_params") else st.experimental_get_query_params()
+        pid = ensure_browser_id()  # uses localStorage
     except Exception:
-        qp = {}
-    qp_pid = None
-    if isinstance(qp, dict) and "pid" in qp:
-        v = qp["pid"]
-        qp_pid = v[0] if isinstance(v, list) else v
-    pid = (
-        qp_pid
-        or _from_secrets_or_env("pid","PID","user_id","USER_ID")
-        or os.environ.get("USER") or os.environ.get("USERNAME")
-        or "local-user"
-    )
+        pid = None
+
+    if not pid:
+        try:
+            qp = st.query_params if hasattr(st, "query_params") else st.experimental_get_query_params()
+            v = qp.get("pid")
+            pid = v[0] if isinstance(v, list) else v
+        except Exception:
+            pass
+
+    if not pid:
+        pid = os.environ.get("PID") or os.environ.get("USER_ID") \
+              or os.environ.get("USER") or os.environ.get("USERNAME") \
+              or "local-user"
+
     st.session_state["pid"] = str(pid)
     return st.session_state["pid"]
+
+def _maybe_restore_from_snapshot(pid: str) -> bool:
+    """
+    If memory is empty and a snapshot exists, hydrate session_state.
+    Returns True if a restore occurred.
+    """
+    # don't clobber an active generation
+    if st.session_state.get("is_generating") or st.session_state.get("pending_choice"):
+        return False
+    # if we already have a scene/history, nothing to do
+    if st.session_state.get("scene") or st.session_state.get("history"):
+        return False
+
+    try:
+        snap = load_snapshot(pid)
+    except Exception:
+        snap = None
+
+    if not snap:
+        return False
+
+    # Core story state
+    st.session_state["scene"]   = snap.get("scene") or ""
+    st.session_state["choices"] = snap.get("choices") or []
+    st.session_state["history"] = snap.get("history") or []
+
+    # Player profile (so onboarding won’t show)
+    st.session_state["player_name"]      = snap.get("username") or st.session_state.get("player_name")
+    st.session_state["player_gender"]    = snap.get("gender")    or st.session_state.get("player_gender", "Unspecified")
+    st.session_state["player_archetype"] = snap.get("archetype") or st.session_state.get("player_archetype", "Default")
+
+    # If you track counters/flags in the DB, load them too (guarded):
+    for k in ("decisions_count", "beat_index", "story_complete", "is_dead"):
+        if k in snap and snap[k] is not None:
+            st.session_state[k] = snap[k]
+
+    return True
 
 # =============================================================================
 # Illustration helpers
@@ -349,12 +398,10 @@ def _advance_turn(pid: str, story_slot, sep_slot, illus_slot, grid_slot, anim_en
         if seed.strip():
             _start_illustration_job(seed, bool(st.session_state.get("simple_cyoa", True)))
 
-    # choices (visible immediately)
-    choices=generate_choices(st.session_state["history"],full,LORE)
-    st.session_state["choices"]=choices
-    grid_slot.markdown('<div class="choices-band"></div>', unsafe_allow_html=True)
-    render_choices_grid(grid_slot, choices=choices, generating=False, count=CHOICE_COUNT)
-    st.session_state["t_choices_visible_at"]=time.time()
+    # choices: compute/store only; render happens once later in main()
+    choices = generate_choices(st.session_state["history"], full, LORE)
+    st.session_state["choices"] = choices
+    # do NOT render here; main() will render once and set t_choices_visible_at
 
     # beat bookkeeping / snapshot
     if st.session_state.get("story_mode"):
@@ -366,10 +413,25 @@ def _advance_turn(pid: str, story_slot, sep_slot, illus_slot, grid_slot, anim_en
                 st.session_state["beat_index"]=min(st.session_state.get("beat_index",0)+1,len(BEATS)-1)
                 st.session_state["_beat_scene_count"]=0
 
-    username=st.session_state.get("player_name") or st.session_state.get("player_username") or None
-    gender=st.session_state.get("player_gender"); archetype=st.session_state.get("player_archetype")
-    try: save_snapshot(pid, full, choices, st.session_state["history"], username=username, gender=gender, archetype=archetype)
-    except TypeError: save_snapshot(pid, full, choices, st.session_state["history"], username=username)
+    username = st.session_state.get("player_name") or st.session_state.get("player_username")
+    gender   = st.session_state.get("player_gender")
+    arch     = st.session_state.get("player_archetype")
+
+    # Try kwargs first (newer store signatures), then positional (older).
+    try:
+        save_snapshot(
+            pid,
+            scene=full,
+            choices=choices,
+            history=st.session_state.get("history", []),
+            username=username,
+            gender=gender,
+            archetype=arch,
+        )
+    except TypeError:
+        # Older signature: (user_id, scene, choices, history, username=None, gender=None, archetype=None)
+        save_snapshot(pid, full, choices, st.session_state.get("history", []), username, gender, arch)
+
 
     st.session_state["scene_count"] = scene_index
 
@@ -418,7 +480,10 @@ def main():
     inject_css()
     ensure_keys()
     init_db()
+
     pid = resolve_pid()
+    # Try restoring if memory is empty
+    _maybe_restore_from_snapshot(pid)
 
     # As soon as a scene exists, permanently hide onboarding
     if (st.session_state.get("scene") or st.session_state.get("history")):
@@ -500,10 +565,143 @@ def main():
 
     with st.sidebar:
         if DEV_UI_ALLOWED:
-            st.session_state["_dev"] = st.checkbox("Developer tools", value=bool(st.session_state.get("_dev", False)))
+            st.session_state["_dev"] = st.checkbox(
+                "Developer tools",
+                value=bool(st.session_state.get("_dev", False)),
+                help="Show debug info & self-tests",
+                key="dev_toggle",
+            )
         else:
             st.session_state["_dev"] = False
+        if st.session_state.get("_dev"):
+            
+            now = time.time()
 
+            try:
+                _has = bool(has_snapshot(pid))
+                _snap = load_snapshot(pid) if _has else None
+            except Exception:
+                _has = False
+                _snap = None
+
+            scene_text = (st.session_state.get("scene") or "").strip()
+            choices = st.session_state.get("choices", [])
+            history = st.session_state.get("history", [])
+
+            t_scene   = st.session_state.get("t_scene_start")
+            t_choices = st.session_state.get("t_choices_visible_at")
+            age_scene   = f"{now - t_scene:.1f}s" if t_scene else "–"
+            age_choices = f"{now - t_choices:.1f}s" if t_choices else "–"
+
+            # Illustration job for *current* scene
+            simple_flag = bool(st.session_state.get("simple_cyoa", True))
+            cur_key, cur_job = _job_for_scene(scene_text, simple_flag)
+            cur_done = cur_job["future"].done() if cur_job else None
+            cur_has_result = (cur_job and (cur_job.get("result") is not None))
+
+            st.caption(
+                f"PID: `{pid}` • has_snapshot: {int(_has)} • "
+                f"scene_len: {len(scene_text)} • history: {len(history)} • choices: {len(choices)}"
+            )
+            st.caption(
+                f"pending_choice: {st.session_state.get('pending_choice')} • "
+                f"is_generating: {int(bool(st.session_state.get('is_generating')))} • "
+                f"onboard_dismissed: {int(bool(st.session_state.get('onboard_dismissed')))} • "
+                f"scene_count: {st.session_state.get('scene_count', 0)}"
+            )
+            st.caption(
+                f"beat_index: {st.session_state.get('beat_index', 0)} • story_mode: {int(bool(st.session_state.get('story_mode', True)))} • "
+                f"t_scene_age: {age_scene} • t_choices_age: {age_choices}"
+            )
+
+            # --- Illustration diagnostics ---
+            with st.expander("Illustration state", expanded=False):
+                st.write({
+                    "display_illustration_url?": bool(st.session_state.get("display_illustration_url")),
+                    "ill_last_key": st.session_state.get("ill_last_key"),
+                    "cur_job_key": cur_key,
+                    "cur_job_exists": bool(cur_job),
+                    "cur_job_done": bool(cur_done) if cur_job else None,
+                    "cur_job_has_result": bool(cur_has_result) if cur_job else None,
+                    "ill_jobs_count": len(st.session_state.get("ill_jobs", {})),
+                    "ill_polls": st.session_state.get("ill_polls", {}),
+                })
+
+            # --- Snapshot vs memory ---
+            with st.expander("Snapshot vs memory", expanded=False):
+                snap_scene_len = len((_snap.get("scene") or "")) if _snap else 0
+                snap_choices_len = len((_snap.get("choices") or [])) if _snap else 0
+                st.write({
+                    "snapshot_exists": _has,
+                    "snap_scene_len": snap_scene_len,
+                    "mem_scene_len": len(scene_text),
+                    "snap_choices_len": snap_choices_len,
+                    "mem_choices_len": len(choices),
+                })
+
+                c1, c2, c3 = st.columns(3)
+                if c1.button("Save snapshot now", key="dev_save_snapshot"):
+                    try:
+                        # Prefer keyword args for newer store APIs
+                        save_snapshot(
+                            pid,
+                            scene=scene_text,
+                            choices=choices,
+                            history=history,
+                            username=st.session_state.get("player_name"),
+                            gender=st.session_state.get("player_gender"),
+                            archetype=st.session_state.get("player_archetype"),
+                        )
+                        st.success("Snapshot saved.")
+                    except TypeError:
+                        # Fallback to older signature
+                        save_snapshot(
+                            pid,
+                            scene_text,
+                            choices,
+                            history,
+                            st.session_state.get("player_name"),
+                            st.session_state.get("player_gender"),
+                            st.session_state.get("player_archetype"),
+                        )
+                        st.success("Snapshot saved (legacy signature).")
+                    except Exception as e:
+                        st.error(f"Save failed: {e}")
+
+                if c2.button("Reload snapshot → memory", key="dev_reload_snapshot"):
+                    restored = _maybe_restore_from_snapshot(pid)
+                    st.info(f"Restore attempted: {restored}")
+
+                if c3.button("Delete snapshot", key="dev_delete_snapshot"):
+                    try:
+                        delete_snapshot(pid)
+                        st.warning("Snapshot deleted.")
+                    except Exception as e:
+                        st.error(f"Delete failed: {e}")
+
+            # --- Session dump (compact) ---
+            with st.expander("Session dump (compact)", expanded=False):
+                dump = {k: v for k, v in st.session_state.items()
+                        if k not in ("history", "choices", "scene")}
+                dump["scene_preview"]   = scene_text[:200] + ("…" if len(scene_text) > 200 else "")
+                dump["history_len"]     = len(history)
+                dump["choices_len"]     = len(choices)
+                st.json(dump)
+
+            # --- Utilities ---
+            c1, c2, c3 = st.columns(3)
+            if c1.button("Soft rerun", key="dev_soft_rerun"):
+                _soft_rerun()
+            if c2.button("Clear ill_jobs", key="dev_clear_ill_jobs"):
+                st.session_state["ill_jobs"] = {}
+                st.session_state["ill_last_key"] = None
+                st.info("Cleared illustration jobs.")
+            if c3.button("Clear memory (keep profile)", key="dev_clear_memory"):
+                for k in ("scene","choices","history","pending_choice","is_generating",
+                        "t_choices_visible_at","t_scene_start","is_dead"):
+                    st.session_state.pop(k, None)
+                st.info("Cleared in-memory story state.")
+                
     # Sidebar actions
     if action == "start":
         try: delete_snapshot(pid)
@@ -539,8 +737,9 @@ def main():
         _advance_turn(pid, story_ph, sep_ph, illus_ph, choices_ph, anim_enabled=True)
         st.session_state["pending_choice"] = None
         st.session_state["is_generating"] = False
-        _soft_rerun()
-        return
+        # IMPORTANT: do NOT rerun or return here.
+        # Fall through to the normal render below so the illustration
+        # stays visible and only swaps when ready.
 
     # Show onboarding ONLY if it hasn't been dismissed AND we're not generating/queued AND no scene yet
     show_onboarding = (
