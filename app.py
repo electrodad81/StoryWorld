@@ -21,9 +21,52 @@ from data.store import (
 
 from concurrent.futures import ThreadPoolExecutor
 
+
 # =============================================================================
 # Config / identity
 # =============================================================================
+
+try:
+    from streamlit_js_eval import streamlit_js_eval
+except Exception:
+    streamlit_js_eval = None
+
+def _pin_pid_in_url(pid: str) -> None:
+    """
+    Ensure ?pid=... is present in the current URL (without reloading the page).
+    Uses history.replaceState via JS for maximum compatibility on hosted Streamlit.
+    Safe no-op if the JS helper isn't available.
+    """
+    if not pid:
+        return
+    # Prefer JS push/replace to avoid Streamlit re-mount quirks in hosted envs
+    if streamlit_js_eval:
+        try:
+            streamlit_js_eval(
+                js_expressions=f"""
+                    (() => {{
+                        const url = new URL(window.location.href);
+                        url.searchParams.set('pid', '{pid}');
+                        window.history.replaceState({{}}, '', url.toString());
+                        return url.toString();
+                    }})()
+                """,
+                key=f"pin_pid_{pid}",
+            )
+            return
+        except Exception:
+            pass
+    # Fallback to Streamlit's API
+    try:
+        if hasattr(st, "query_params"):
+            st.query_params.update({"pid": pid})
+        else:
+            cur = st.experimental_get_query_params()
+            cur["pid"] = pid
+            st.experimental_set_query_params(**cur)
+    except Exception:
+        pass
+
 def _to_bool(v, default=False):
     if v is None: return default
     if isinstance(v, bool): return v
@@ -48,35 +91,66 @@ DEV_UI_ALLOWED = _to_bool(
 
 def resolve_pid() -> str:
     """
-    Resolve a stable per-browser PID via identity.ensure_browser_id().
-    Avoid generating alternates unless absolutely necessary.
+    Stable per-browser PID resolution:
+
+    Order:
+      1) URL ?pid=... (authoritative)
+      2) localStorage via ensure_browser_id()
+      3) If PID_WAIT_BOOTSTRAP is true: do a one-time soft rerun to wait for localStorage.
+         Otherwise: fall back to 'local-user' (keeps local refresh working).
+
+    When we get a browser PID, pin it into the URL (no page reload).
     """
-    # If already resolved this run, return it
+    # 0) Already in session
     if st.session_state.get("pid"):
         return st.session_state["pid"]
 
-    # Ask identity helper (handles URL/localStorage/bootstrap)
+    # 1) From URL
     try:
-        bid = ensure_browser_id()
-    except Exception:
-        bid = None
-
-    # Final fallback only if everything else failed
-    if not bid:
-        import uuid
-        bid = "brw-" + uuid.uuid4().hex
-
-    st.session_state["pid"] = str(bid)
-
-    # Mirror into URL for refresh survival (no-op if already set)
-    try:
-        cur = dict(getattr(st, "query_params", {}))
-        if cur.get("pid") != st.session_state["pid"]:
-            st.query_params = {**cur, "pid": st.session_state["pid"]}
+        qp = st.query_params if hasattr(st, "query_params") else st.experimental_get_query_params()
+        qp_pid = qp.get("pid")
+        if isinstance(qp_pid, list):
+            qp_pid = qp_pid[0]
+        if qp_pid:
+            pid = str(qp_pid)
+            st.session_state["pid"] = pid
+            _pin_pid_in_url(pid)
+            return pid
     except Exception:
         pass
 
+    # 2) From localStorage (component may not be ready on first render in hosted envs)
+    pid = None
+    try:
+        pid = ensure_browser_id()  # returns brw-... when ready; may be None on first paint
+    except Exception:
+        pid = None
+
+    if pid:
+        pid = str(pid)
+        st.session_state["pid"] = pid
+        _pin_pid_in_url(pid)
+        return pid
+
+    # 3) Fallback differs by mode:
+    if PID_WAIT_BOOTSTRAP:
+        # Hosted: wait exactly one render to let localStorage initialize
+        if not st.session_state.get("_pid_bootstrap_waited"):
+            st.session_state["_pid_bootstrap_waited"] = True
+            time.sleep(0.03)
+            (getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None))()
+            st.stop()
+        # If we already waited and still no pid, degrade gracefully:
+        pid = os.environ.get("PID") or "local-user"
+    else:
+        # Local: do NOT interrupt; preserve your previously-working refresh behavior
+        pid = os.environ.get("PID") or "local-user"
+
+    st.session_state["pid"] = str(pid)
     return st.session_state["pid"]
+
+# NEW: enable “hosted PID bootstrap” only when you want it (e.g., on deployed)
+PID_WAIT_BOOTSTRAP = _to_bool(_from_secrets_or_env("PID_WAIT_BOOTSTRAP", "DEPLOYED", "FORCE_URL_PID"), default=False)
 
 def _maybe_restore_from_snapshot(pid: str) -> bool:
     """
