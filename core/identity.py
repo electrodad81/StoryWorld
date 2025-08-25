@@ -11,8 +11,44 @@ import uuid
 import uuid
 import streamlit as st
 
+try:
+    from streamlit_js_eval import streamlit_js_eval
+except Exception:
+    streamlit_js_eval = None
+
 _COOKIE = "storyworld_pid"
 _LS_KEY = "storyworld_browser_id"
+
+def _pin_pid_in_url(pid: str) -> None:
+    if not pid:
+        return
+    # Prefer JS replaceState (no reload)
+    if streamlit_js_eval:
+        try:
+            streamlit_js_eval(
+                js_expressions=f"""
+                    (() => {{
+                        const url = new URL(window.location.href);
+                        url.searchParams.set('pid', '{pid}');
+                        window.history.replaceState({{}}, '', url.toString());
+                        return url.toString();
+                    }})()
+                """,
+                key=f"pin_pid_{pid}",
+            )
+            return
+        except Exception:
+            pass
+    # Fallback to Streamlit API
+    try:
+        if hasattr(st, "query_params"):
+            st.query_params.update({"pid": pid})
+        else:
+            cur = st.experimental_get_query_params()
+            cur["pid"] = pid
+            st.experimental_set_query_params(**cur)
+    except Exception:
+        pass
 
 def _read_cookie(name: str) -> Optional[str]:
     try:
@@ -59,27 +95,43 @@ def ensure_browser_id(store_key: str = _LS_KEY) -> str:
         url_pid = v[0] if isinstance(v, list) else v
         if url_pid:
             st.session_state["browser_id"] = url_pid
+            # mirror everywhere
+            _pin_pid_in_url(url_pid)
+            _write_cookie(_COOKIE, url_pid)
+            if streamlit_js_eval:
+                try:
+                    streamlit_js_eval(
+                        js_expressions=f"localStorage.setItem('{store_key}', '{url_pid}')",
+                        key="sync_ls_from_url",
+                    )
+                except Exception:
+                    pass
             return url_pid
     except Exception:
         pass
 
-    # 3) localStorage
+    # 3) localStorage  (FIX: use `bid`, not `url_pid`)
     try:
-        from streamlit_js_eval import streamlit_js_eval
-        ls = streamlit_js_eval(
-            js_expressions=f"localStorage.getItem('{store_key}')",
-            key="read_ls_pid",
-        )
+        if streamlit_js_eval:
+            ls = streamlit_js_eval(
+                js_expressions=f"localStorage.getItem('{store_key}')",
+                key="read_ls_pid",
+            )
+        else:
+            ls = None
         if isinstance(ls, str) and ls.strip():
             bid = ls.strip()
             st.session_state["browser_id"] = bid
-            # mirror into URL
-            try:
-                cur = dict(getattr(st, "query_params", {}))
-                if cur.get("pid") != bid:
-                    st.query_params = {**cur, "pid": bid}
-            except Exception:
-                pass
+            _pin_pid_in_url(bid)          # <-- put it in the URL
+            _write_cookie(_COOKIE, bid)   # <-- FIXED: was url_pid
+            if streamlit_js_eval:
+                try:
+                    streamlit_js_eval(
+                        js_expressions=f"localStorage.setItem('{store_key}', '{bid}')",
+                        key="echo_ls_pid",
+                    )
+                except Exception:
+                    pass
             return bid
     except Exception:
         pass
@@ -88,48 +140,40 @@ def ensure_browser_id(store_key: str = _LS_KEY) -> str:
     cookie_pid = _read_cookie(_COOKIE)
     if cookie_pid:
         st.session_state["browser_id"] = cookie_pid
-        # mirror into URL and localStorage
+        _pin_pid_in_url(cookie_pid)  # mirror URL
+        if streamlit_js_eval:
+            try:
+                streamlit_js_eval(
+                    js_expressions=f"localStorage.setItem('{store_key}', '{cookie_pid}')",
+                    key="write_ls_from_cookie",
+                )
+            except Exception:
+                pass
+        return cookie_pid
+
+    # 5) generate new (one-time wait)
+    if not st.session_state.get("_pid_waited_once"):
+        st.session_state["_pid_waited_once"] = True
+        (getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None))()
+        st.stop()
+
+    bid = "brw-" + uuid.uuid4().hex
+    st.session_state["browser_id"] = bid
+    _pin_pid_in_url(bid)
+    _write_cookie(_COOKIE, bid)
+    if streamlit_js_eval:
         try:
-            cur = dict(getattr(st, "query_params", {}))
-            if cur.get("pid") != cookie_pid:
-                st.query_params = {**cur, "pid": cookie_pid}
-        except Exception:
-            pass
-        try:
-            from streamlit_js_eval import streamlit_js_eval
             streamlit_js_eval(
-                js_expressions=f"localStorage.setItem('{store_key}', '{cookie_pid}')",
-                key="write_ls_from_cookie",
+                js_expressions=f"localStorage.setItem('{store_key}', '{bid}')",
+                key="write_ls_pid",
             )
         except Exception:
             pass
-        return cookie_pid
-
-    # 5) generate new
-    bid = "brw-" + uuid.uuid4().hex
-    st.session_state["browser_id"] = bid
-    # write everywhere we can
-    _write_cookie(_COOKIE, bid)
-    try:
-        from streamlit_js_eval import streamlit_js_eval
-        streamlit_js_eval(
-            js_expressions=f"localStorage.setItem('{store_key}', '{bid}')",
-            key="write_ls_pid",
-        )
-    except Exception:
-        pass
-    try:
-        cur = dict(getattr(st, "query_params", {}))
-        if cur.get("pid") != bid:
-            st.query_params = {**cur, "pid": bid}
-    except Exception:
-        pass
 
     # one-time bootstrap rerun
     if not st.session_state.get("_pid_bootstrapped"):
         st.session_state["_pid_bootstrapped"] = True
         (getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None))()
-
     return bid
 
 def clear_browser_id_and_reload():
