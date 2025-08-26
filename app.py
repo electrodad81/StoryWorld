@@ -21,6 +21,9 @@ from data.store import (
 
 from concurrent.futures import ThreadPoolExecutor
 
+def _should_illustrate(scene_index: int) -> bool:
+    """Return True if the given scene index should display an illustration."""
+    return ((scene_index - ILLUSTRATION_PHASE) % ILLUSTRATION_EVERY_N) == 0
 
 # =============================================================================
 # Config / identity
@@ -309,22 +312,45 @@ def _prune_old_jobs(keep_last_n: int = 8) -> None:
         jobs.pop(k, None)
     st.session_state["ill_jobs"] = jobs
 
-def _harvest_illustrations():
-    """
-    Check all jobs; finalize done ones and pick the 'best' finished image:
-    highest scene_index wins; tie-breaker: latest completed_at.
-    Returns: (img_url|None, debug|None, finished_key|None, any_running: bool)
-    """
-    jobs = st.session_state.get("ill_jobs", {})
-    any_running = False
-    best = None  # tuple(scene_index, completed_at, key, job)
+def _opening_seed() -> str:
+    if isinstance(LORE, dict):
+        for k in ("opening_image_prompt", "opening_prompt", "prologue_image", "opening_seed"):
+            v = LORE.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    hero = st.session_state.get("player_name") or "a traveler"
+    return (
+        f"{APP_TITLE} opening tableau: {hero} at the edge of the Waking Forest, "
+        "lantern glow in mist, storybook line art, clean contrast, minimal shading"
+    )
 
+def maybe_kickoff_opening_illustration():
+    # Only while onboarding is visible, and before any scenes
+    if st.session_state.get("scene_count", 0) > 0: return
+    if st.session_state.get("onboard_dismissed", False): return
+
+    jobs = st.session_state.setdefault("ill_jobs", {})
+    for j in jobs.values():
+        si = int(j.get("scene_index") or -1)
+        if si in (0, 1):
+            return  # already queued for opening
+
+    seed = _opening_seed()
+    if seed.strip():
+        _start_illustration_job(
+            seed_sentence=seed,
+            simple=bool(st.session_state.get("simple_cyoa", True)),
+            scene_index=1,  # treat as first-scene art
+        )
+
+def _harvest_for_scene(target_scene_index: int):
+    jobs = st.session_state.get("ill_jobs", {})
+    best = None
     for key, job in list(jobs.items()):
         fut = job.get("future")
         if not fut:
             continue
-
-        # finalize if newly done
+        # finalize once
         if fut.done() and job.get("result") is None:
             try:
                 job["result"] = fut.result(timeout=0)
@@ -332,22 +358,55 @@ def _harvest_illustrations():
                 job["result"] = (None, {"error": repr(e)})
             job["completed_at"] = time.time()
 
-        if job.get("result") is None:
-            any_running = True
+        # we only care about the target scene's art
+        if int(job.get("scene_index") or -1) != int(target_scene_index):
             continue
-
-        si = int(job.get("scene_index") or -1)
+        res = job.get("result")
+        if res is None:
+            continue
+        # prefer latest completion if multiple
         ca = float(job.get("completed_at") or 0)
-        if (best is None) or (si > best[0]) or (si == best[0] and ca > best[1]):
-            best = (si, ca, key, job)
+        if (best is None) or (ca > best[0]):
+            best = (ca, key, job)
 
-    _prune_old_jobs()
     if best:
-        _si, _ca, key, job = best
+        _, key, job = best
         res = job.get("result")
         img_ref, dbg = res if (isinstance(res, tuple) and len(res) == 2) else (res, {})
-        return img_ref, dbg, key, any_running
-    return None, None, None, any_running
+        return img_ref, dbg
+    return None, None
+
+def render_persistent_illustration(illus_ph, current_scene_index: int):
+    """
+    Keep the last image until this scene's art is finished; never show loading UI.
+    """
+    current_url = st.session_state.get("display_illustration_url")
+    target_url, dbg = _harvest_for_scene(current_scene_index)
+
+    # swap only if we got the image for THIS scene
+    if target_url and target_url != current_url:
+        st.session_state["display_illustration_url"] = target_url
+        st.session_state["last_illustration_debug"] = dbg
+        current_url = target_url
+
+        # NEW: persist for snapshots + rehydrate after refresh
+        st.session_state["last_illustration_url"] = current_url
+        # NEW: cache by scene keys so a refresh can instantly restore
+        try:
+            store = _illustration_store()
+            simple_flag = bool(st.session_state.get("simple_cyoa", True))
+            for k in _scene_keys_for(st.session_state.get("scene", ""), simple_flag):
+                store[k] = current_url
+        except Exception:
+            pass
+
+    if current_url:
+        illus_ph.markdown(
+            f'<div class="illus-inline"><img src="{current_url}" alt="illustration"/></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        illus_ph.empty()  # no placeholder
 
 def _gentle_autorefresh_any_running(delay: float = 0.7, max_polls: int = 40) -> None:
     """Poll while there are any running illustration jobs (global), bounded."""
@@ -366,50 +425,6 @@ def _gentle_autorefresh_any_running(delay: float = 0.7, max_polls: int = 40) -> 
 
 def _soft_rerun():
     (getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None))()
-
-def _gentle_autorefresh_if_pending(job_key: Optional[str], delay: float = 0.7, max_polls: int = 40) -> None:
-    """Call at the end so choices are already on-screen when the rerun happens."""
-    if not job_key: return
-    job = st.session_state.get("ill_jobs", {}).get(job_key)
-    if not job or job["future"].done(): return
-    polls = st.session_state.setdefault("ill_polls", {})
-    c = int(polls.get(job_key, 0))
-    if c >= max_polls: return
-    polls[job_key] = c + 1
-    st.session_state["ill_polls"] = polls
-    time.sleep(delay)
-    _soft_rerun()
-
-def render_persistent_illustration(illus_ph):
-    """
-    Keep the last shown image visible; whenever ANY job finishes in the background,
-    atomically swap to the newest finished image (by scene_index, then completion time).
-    """
-    current = st.session_state.get("display_illustration_url")
-    img_ref, dbg, finished_key, any_running = _harvest_illustrations()
-
-    # Swap in any new finished image
-    if img_ref:
-        if img_ref != current:
-            st.session_state["display_illustration_url"] = img_ref
-            st.session_state["last_illustration_debug"] = dbg
-        current = img_ref
-
-    # Draw (skeleton only if we've never had any image yet)
-    if current:
-        illus_ph.markdown(
-            f'<div class="illus-inline"><img src="{current}" alt="illustration"/></div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        illus_ph.markdown(
-            '<div class="illus-inline illus-skeleton"><div class="illus-status">Illustration brewing…</div></div>',
-            unsafe_allow_html=True,
-        )
-
-    # Keep polling as long as any jobs are still running
-    _gentle_autorefresh_any_running()
-
 
 # =============================================================================
 # Lore / constants
@@ -643,6 +658,22 @@ def _advance_turn(pid: str, story_slot, sep_slot, illus_slot, grid_slot, anim_en
                     username=st.session_state.get("player_name"))
 
 
+    st.session_state["scene_count"] = scene_index
+
+    # NEW: queue illustration for the *next* scene if that next scene will show art
+    simple_flag = bool(st.session_state.get("simple_cyoa", True))
+    if st.session_state.get("auto_illustrate", True):
+        next_index = scene_index + 1
+        if _should_illustrate(next_index):
+            seed = _has_first_sentence(full) or " ".join(full.split()[:18]) + "…"
+            if seed.strip():
+                _start_illustration_job(
+                    seed_sentence=seed,
+                    simple=simple_flag,
+                    scene_index=next_index,  # ← bake for the next scene
+                )
+
+    # finally bump the counter for this scene
     st.session_state["scene_count"] = scene_index
 
 # =============================================================================
@@ -953,6 +984,7 @@ def main():
         and not st.session_state.get("scene")
     )
     if show_onboarding:
+        maybe_kickoff_opening_illustration()  # pre-queue opening art if needed
         onboarding(pid)
         return
 
@@ -984,7 +1016,10 @@ def main():
             pass
 
     # Then render illustration into its placeholder; helper will schedule a rerun if needed.
-    render_persistent_illustration(illus_ph)
+    current_ix = st.session_state.get("scene_count", 0)
+    render_persistent_illustration(illus_ph, current_ix)
+    _gentle_autorefresh_any_running()
 
+    
 if __name__ == "__main__":
     main()
