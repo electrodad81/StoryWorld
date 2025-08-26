@@ -34,7 +34,8 @@ def generate_illustration(scene: str, simple: bool = True) -> Tuple[Optional[str
             "Simple, clean black-and-white line-and-wash with a single colored highlight. Minimal hatching, clear contours, "
             "single focal subject, medium or close-up shot. Lighthearted adventure tone. "
             "the background behind the image subject should be plain white, "
-            "lightly intricate textures, careful crosshatching, no gore. " 
+            "lightly intricate textures, careful crosshatching, no gore, no guns, no modern tech, no text. " \
+            "Do not show the protagonist's face directly." 
         )
     else:
         style_prompt = (
