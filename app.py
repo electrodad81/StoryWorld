@@ -89,6 +89,46 @@ DEV_UI_ALLOWED = _to_bool(
     default=False,
 )
 
+###  HARD RESET FUNCTION
+def hard_reset_app(pid: str):
+    """Completely reset app state for this PID, but keep identity stable."""
+    # 1) drop persisted snapshot
+    try:
+        delete_snapshot(pid)
+    except Exception:
+        pass
+
+    # 2) preserve identity anchors; everything else is wiped
+    preserve = {
+        k: st.session_state.get(k)
+        for k in ("browser_id", "pid", "_pid_bootstrapped", "_pid_waited_once")
+        if k in st.session_state
+    }
+
+    # 3) nuke session state
+    st.session_state.clear()
+
+    # 4) re-seed defaults and restore identity
+    ensure_keys()
+    st.session_state.update(preserve)
+
+    # force onboarding on next render
+    st.session_state["onboard_dismissed"] = False
+
+    # 5) clear caches (optional but helps avoid stale resources)
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+    try:
+        st.cache_resource.clear()
+    except Exception:
+        pass
+
+    # 6) rerun immediately
+    (getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None))()
+
+
 def resolve_pid() -> str:
     """
     Stable per-browser PID resolution:
@@ -229,13 +269,22 @@ def _scene_key(text: str, simple: bool) -> str:
     h = hashlib.md5((text.strip() + f"|{simple}").encode("utf-8")).hexdigest()
     return f"ill-{h}"
 
-def _start_illustration_job(seed_sentence: str, simple: bool) -> str:
+def _start_illustration_job(seed_sentence: str, simple: bool, scene_index: Optional[int] = None) -> str:
     key = _scene_key(seed_sentence, simple)
     jobs = st.session_state.setdefault("ill_jobs", {})
     if key in jobs:
         return key
+
     fut = _ill_executor().submit(generate_illustration, seed_sentence, simple)
-    jobs[key] = {"future": fut, "result": None}
+    jobs[key] = {
+        "future": fut,
+        "result": None,
+        "seed": seed_sentence,
+        "simple": simple,
+        "scene_index": scene_index if scene_index is not None else (st.session_state.get("scene_count", 0) + 1),
+        "created_at": time.time(),
+        "completed_at": None,
+    }
     st.session_state["ill_last_key"] = key
     return key
 
@@ -245,6 +294,75 @@ def _job_for_scene(scene_text: str, simple: bool):
     key  = _scene_key(seed, simple)
     jobs = st.session_state.get("ill_jobs", {})
     return key, jobs.get(key)
+
+def _prune_old_jobs(keep_last_n: int = 8) -> None:
+    jobs = st.session_state.get("ill_jobs", {})
+    if len(jobs) <= keep_last_n:
+        return
+    items = []
+    for k, j in jobs.items():
+        si = int(j.get("scene_index") or -1)
+        ca = float(j.get("completed_at") or 0)
+        items.append((si, ca, k))
+    items.sort(reverse=True)  # newest scenes first, then most recent completion
+    for _, _, k in items[keep_last_n:]:
+        jobs.pop(k, None)
+    st.session_state["ill_jobs"] = jobs
+
+def _harvest_illustrations():
+    """
+    Check all jobs; finalize done ones and pick the 'best' finished image:
+    highest scene_index wins; tie-breaker: latest completed_at.
+    Returns: (img_url|None, debug|None, finished_key|None, any_running: bool)
+    """
+    jobs = st.session_state.get("ill_jobs", {})
+    any_running = False
+    best = None  # tuple(scene_index, completed_at, key, job)
+
+    for key, job in list(jobs.items()):
+        fut = job.get("future")
+        if not fut:
+            continue
+
+        # finalize if newly done
+        if fut.done() and job.get("result") is None:
+            try:
+                job["result"] = fut.result(timeout=0)
+            except Exception as e:
+                job["result"] = (None, {"error": repr(e)})
+            job["completed_at"] = time.time()
+
+        if job.get("result") is None:
+            any_running = True
+            continue
+
+        si = int(job.get("scene_index") or -1)
+        ca = float(job.get("completed_at") or 0)
+        if (best is None) or (si > best[0]) or (si == best[0] and ca > best[1]):
+            best = (si, ca, key, job)
+
+    _prune_old_jobs()
+    if best:
+        _si, _ca, key, job = best
+        res = job.get("result")
+        img_ref, dbg = res if (isinstance(res, tuple) and len(res) == 2) else (res, {})
+        return img_ref, dbg, key, any_running
+    return None, None, None, any_running
+
+def _gentle_autorefresh_any_running(delay: float = 0.7, max_polls: int = 40) -> None:
+    """Poll while there are any running illustration jobs (global), bounded."""
+    jobs = st.session_state.get("ill_jobs", {})
+    if not any((j.get("future") and not j["future"].done() and j.get("result") is None) for j in jobs.values()):
+        return
+    polls = st.session_state.setdefault("ill_polls", {})
+    c = int(polls.get("__ANY__", 0))
+    if c >= max_polls:
+        return
+    polls["__ANY__"] = c + 1
+    st.session_state["ill_polls"] = polls
+    time.sleep(delay)
+    _soft_rerun()
+
 
 def _soft_rerun():
     (getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None))()
@@ -262,83 +380,36 @@ def _gentle_autorefresh_if_pending(job_key: Optional[str], delay: float = 0.7, m
     time.sleep(delay)
     _soft_rerun()
 
-def render_persistent_illustration(illus_ph, scene_text: str):
+def render_persistent_illustration(illus_ph):
     """
-    Keep the currently displayed image on-screen while a new job is pending.
-    Only swap to the new image when it is ready. If we’ve never shown any image,
-    display a small skeleton during the first-ever generation.
+    Keep the last shown image visible; whenever ANY job finishes in the background,
+    atomically swap to the newest finished image (by scene_index, then completion time).
     """
-    simple_flag = bool(st.session_state.get("simple_cyoa", True))
-    url = st.session_state.get("display_illustration_url")  # what is currently shown
-    status_text = ""
-    pending_key_for_refresh = None
+    current = st.session_state.get("display_illustration_url")
+    img_ref, dbg, finished_key, any_running = _harvest_illustrations()
 
-    key, job = _job_for_scene(scene_text or "", simple_flag)
+    # Swap in any new finished image
+    if img_ref:
+        if img_ref != current:
+            st.session_state["display_illustration_url"] = img_ref
+            st.session_state["last_illustration_debug"] = dbg
+        current = img_ref
 
-    if job:
-        fut = job["future"]
-        if fut.done() and job.get("result") is None:
-            try:
-                job["result"] = fut.result(timeout=0)
-            except Exception as e:
-                job["result"] = (None, {"error": repr(e)})
-
-        res = job.get("result")
-        if res is not None:
-            img_ref, dbg = res if (isinstance(res, tuple) and len(res) == 2) else (res, {})
-            if img_ref:
-                st.session_state["display_illustration_url"] = img_ref
-                st.session_state["last_illustration_url"] = img_ref
-                st.session_state["last_illustration_debug"] = dbg
-                
-                # NEW: cache by deterministic key so refresh can restore it
-                try:
-                    store = _illustration_store()
-                    store[_scene_key(seed_sentence := ( _has_first_sentence(scene_text) or scene_text ), 
-                                     bool(st.session_state.get("simple_cyoa", True)))] = img_ref
-                except Exception:
-                    pass
-                url = img_ref
-            else:
-                # ---------- NEW: show error instead of spinning forever ----------
-                err = (dbg or {}).get("error") if isinstance(dbg, dict) else None
-                if err:
-                    illus_ph.markdown(
-                        f"""
-                        <div class="illus-inline illus-skeleton">
-                          <div class="illus-status">Illustration failed.</div>
-                          <div class="illus-status" style="opacity:.75; font-size:.85rem; margin-top:.35rem;">
-                            <code>{err}</code>
-                          </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                    return
-                # -----------------------------------------------------------------
-                # No URL and no explicit error: keep skeleton only if we've never shown any image
-                if not url:
-                    status_text = "Illustration unavailable."
-        else:
-            # Job still running → KEEP current image; only show skeleton if we had none
-            if not url:
-                status_text = "Illustration brewing…"
-            pending_key_for_refresh = key
-
-    # Draw: keep current image if any; skeleton only when we have none
-    if url:
+    # Draw (skeleton only if we've never had any image yet)
+    if current:
         illus_ph.markdown(
-            f'<div class="illus-inline"><img src="{url}" alt="illustration"/></div>',
+            f'<div class="illus-inline"><img src="{current}" alt="illustration"/></div>',
             unsafe_allow_html=True,
         )
     else:
         illus_ph.markdown(
-            f'<div class="illus-inline illus-skeleton"><div class="illus-status">{status_text or "Illustration brewing…"}</div></div>',
+            '<div class="illus-inline illus-skeleton"><div class="illus-status">Illustration brewing…</div></div>',
             unsafe_allow_html=True,
         )
 
-    # Schedule rerun *after* choices are already rendered elsewhere
-    _gentle_autorefresh_if_pending(pending_key_for_refresh)
+    # Keep polling as long as any jobs are still running
+    _gentle_autorefresh_any_running()
+
 
 # =============================================================================
 # Lore / constants
@@ -527,7 +598,11 @@ def _advance_turn(pid: str, story_slot, sep_slot, illus_slot, grid_slot, anim_en
     if should_illustrate and st.session_state.get("auto_illustrate", True):
         seed = _has_first_sentence(full) or " ".join(full.split()[:18]) + "…"
         if seed.strip():
-            _start_illustration_job(seed, bool(st.session_state.get("simple_cyoa", True)))
+            _start_illustration_job(
+                seed,
+                bool(st.session_state.get("simple_cyoa", True)),
+                scene_index=scene_index,   # <- new
+            )
 
     # choices: compute/store only; render happens once later in main()
     choices = generate_choices(st.session_state["history"], full, LORE)
@@ -853,13 +928,7 @@ def main():
         _soft_rerun()
 
     elif action == "reset":
-        try: delete_snapshot(pid)
-        except Exception: pass
-        for k in ("scene","choices","history","pending_choice","is_generating",
-                  "t_choices_visible_at","t_scene_start","is_dead","beat_index","story_complete",
-                  "player_name","player_gender","player_archetype","story_mode"):
-            st.session_state.pop(k, None)
-        _soft_rerun()
+        hard_reset_app(pid)  # full cold boot to onboarding
 
     # Placeholders in visual order: story → sep → illustration → choices
     story_ph  = st.empty()
@@ -915,7 +984,7 @@ def main():
             pass
 
     # Then render illustration into its placeholder; helper will schedule a rerun if needed.
-    render_persistent_illustration(illus_ph, st.session_state.get("scene",""))
+    render_persistent_illustration(illus_ph)
 
 if __name__ == "__main__":
     main()
