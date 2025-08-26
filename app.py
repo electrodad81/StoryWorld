@@ -92,6 +92,14 @@ DEV_UI_ALLOWED = _to_bool(
     default=False,
 )
 
+def _log_beat(event: str, **fields):
+    rec = {"t": time.time(), "event": event}
+    rec.update(fields)
+    logs = st.session_state.setdefault("beat_log", [])
+    logs.append(rec)
+    st.session_state["beat_log"] = logs[-200:]  # keep last 200
+
+
 ###  HARD RESET FUNCTION
 def hard_reset_app(pid: str):
     """Completely reset app state for this PID, but keep identity stable."""
@@ -469,6 +477,51 @@ def detect_cost_in_scene(text: str) -> bool:
         if w in (text or "").lower(): return True
     return False
 
+def render_death_options(pid: str, slot) -> None:
+    with slot.container():
+        st.subheader("Your journey ends here.")
+        st.caption("Fate is not always kind in Gloamreach.")
+        c1, c2 = st.columns(2)
+        restart = c1.button("Restart this story", use_container_width=True, key="death_restart")
+        anew    = c2.button("Start a new story", use_container_width=True, key="death_new")
+        if restart or anew:
+            try: save_event(pid, "death_choice", {"action": "restart" if restart else "new"})
+            except Exception: pass
+            for k in ("scene","choices","history","pending_choice","is_generating",
+                      "t_choices_visible_at","t_scene_start","is_dead","beat_index","story_complete"):
+                st.session_state.pop(k, None)
+            try: delete_snapshot(pid)
+            except Exception: pass
+            if st.session_state.get("story_mode"):
+                st.session_state["beat_index"] = 0
+                st.session_state["story_complete"] = False
+            st.session_state["pending_choice"] = "__start__"
+            st.session_state["is_generating"] = True
+            _soft_rerun()
+
+def render_end_options(pid: str, slot) -> None:
+    with slot.container():
+        st.subheader("Your adventure concludes.")
+        st.caption("The story arc has come to an end. What will you do next?")
+        c1, c2 = st.columns(2)
+        restart = c1.button("Restart this story", use_container_width=True, key="end_restart")
+        anew    = c2.button("Start a new story", use_container_width=True, key="end_new")
+        if restart or anew:
+            try: save_event(pid, "complete_choice", {"action": "restart" if restart else "new"})
+            except Exception: pass
+            for k in ("scene","choices","history","pending_choice","is_generating",
+                      "t_choices_visible_at","t_scene_start","is_dead","beat_index","story_complete"):
+                st.session_state.pop(k, None)
+            try: delete_snapshot(pid)
+            except Exception: pass
+            if st.session_state.get("story_mode"):
+                st.session_state["beat_index"] = 0
+                st.session_state["story_complete"] = False
+            st.session_state["pending_choice"] = "__start__"
+            st.session_state["is_generating"] = True
+            _soft_rerun()
+
+
 # =============================================================================
 # Render helpers: separator + inline illustration
 # =============================================================================
@@ -527,8 +580,10 @@ def ensure_keys():
     st.session_state.setdefault("scene_count", 0)
     st.session_state.setdefault("simple_cyoa", True)   # no sidebar control
     st.session_state.setdefault("auto_illustrate", True)
+    st.session_state.setdefault("beat_log", [])
     # --- persistent illustration buffer ---
     st.session_state.setdefault("display_illustration_url", None)
+
 
 def reset_session(full_reset=False):
     keep={}
@@ -624,19 +679,48 @@ def _advance_turn(pid: str, story_slot, sep_slot, illus_slot, grid_slot, anim_en
     st.session_state["choices"] = choices
     # do NOT render here; main() will render once and set t_choices_visible_at
 
-    # beat bookkeeping / snapshot
-    if st.session_state.get("story_mode"):
-        st.session_state["_beat_scene_count"]=st.session_state.get("_beat_scene_count",0)+1
-        current=get_current_beat(st.session_state); target=BEAT_TARGET_SCENES.get(current,1)
-        if st.session_state["_beat_scene_count"]>=target:
-            if current=="resolution": st.session_state["story_complete"]=True
-            else:
-                st.session_state["beat_index"]=min(st.session_state.get("beat_index",0)+1,len(BEATS)-1)
-                st.session_state["_beat_scene_count"]=0
+    if st.session_state.get("story_mode", True):
+        # 1) count this scene toward the current beat
+        st.session_state["_beat_scene_count"] = st.session_state.get("_beat_scene_count", 0) + 1
+        current_beat = get_current_beat(st.session_state)   # e.g., "exposition"
+        target = int(BEAT_TARGET_SCENES.get(current_beat, 1))
 
-    username = st.session_state.get("player_name") or st.session_state.get("player_username")
-    gender   = st.session_state.get("player_gender")
-    arch     = st.session_state.get("player_archetype")
+        # (optional dev log)
+        _log_beat(
+            "scene_in_beat",
+            beat=current_beat,
+            scenes_in_current_beat=st.session_state["_beat_scene_count"],
+            scene_count=st.session_state.get("scene_count", 0),  # the scene you just rendered
+        )
+
+        # 2) advance when we've met/exceeded the target for this beat
+        if st.session_state["_beat_scene_count"] >= target:
+            if current_beat == "resolution":
+                # arc ends
+                mark_story_complete()
+                _log_beat("story_complete", final_beat=current_beat)
+            else:
+                # move to next beat and reset the per-beat counter
+                st.session_state["beat_index"] = min(
+                    st.session_state.get("beat_index", 0) + 1, len(BEATS) - 1
+                )
+                st.session_state["_beat_scene_count"] = 0
+                _log_beat("advance_beat", from_beat=current_beat, to_beat=get_current_beat(st.session_state))
+        # If story is complete, persist and show ending options, then return
+        if is_story_complete(st.session_state):
+            username  = st.session_state.get("player_name") or st.session_state.get("player_username") or None
+            gender    = st.session_state.get("player_gender")
+            archetype = st.session_state.get("player_archetype")
+            try:
+                save_snapshot(pid, full, [], st.session_state["history"], username=username, gender=gender, archetype=archetype)
+            except TypeError:
+                save_snapshot(pid, full, [], st.session_state["history"], username=username)
+
+            render_end_options(pid, grid_slot)  # your existing end-of-story panel
+            return
+    #username = st.session_state.get("player_name") or st.session_state.get("player_username")
+    #gender   = st.session_state.get("player_gender")
+    #arch     = st.session_state.get("player_archetype")
 
     last_img = st.session_state.get("last_illustration_url")
 
@@ -850,10 +934,70 @@ def main():
                 f"onboard_dismissed: {int(bool(st.session_state.get('onboard_dismissed')))} • "
                 f"scene_count: {st.session_state.get('scene_count', 0)}"
             )
+            active_beat = BEATS[int(st.session_state.get('beat_index', 0))] if st.session_state.get('story_mode', True) else 'classic'
             st.caption(
-                f"beat_index: {st.session_state.get('beat_index', 0)} • story_mode: {int(bool(st.session_state.get('story_mode', True)))} • "
+                f"... • beat_index: {st.session_state.get('beat_index', 0)} ({active_beat}) • story_mode: {int(bool(st.session_state.get('story_mode', True)))} • ..."
                 f"t_scene_age: {age_scene} • t_choices_age: {age_choices}"
             )
+
+            with st.expander("Story beats", expanded=True):
+                sm = bool(st.session_state.get("story_mode", True))
+                bi = int(st.session_state.get("beat_index", 0))
+                beat = BEATS[bi] if (0 <= bi < len(BEATS)) else "classic"
+                scenes_in_beat = int(st.session_state.get("_beat_scene_count", 0))
+                target = int(BEAT_TARGET_SCENES.get(beat, 1))
+                scn_total = int(st.session_state.get("scene_count", 0))
+                complete = bool(st.session_state.get("story_complete", False))
+
+                pct = min(1.0, scenes_in_beat / target) if target else 1.0
+                nxt = BEATS[bi + 1] if (bi + 1 < len(BEATS)) else None
+                will_advance = (scenes_in_beat + 1 >= target) and (beat != "resolution") and sm
+                complete_next = (scenes_in_beat + 1 >= target) and (beat == "resolution") and sm
+
+                st.write({
+                    "story_mode": sm,
+                    "beat_index": bi,
+                    "beat": beat,
+                    "scenes_in_current_beat": scenes_in_beat,
+                    "target_for_this_beat": target,
+                    "progress_ratio": f"{scenes_in_beat}/{target}",
+                    "scene_count_total": scn_total,
+                    "will_advance_on_next_scene": will_advance,
+                    "expected_next_beat": nxt,
+                    "story_complete": complete,
+                    "will_complete_on_next_scene": complete_next,
+                })
+
+                try:
+                    st.progress(pct, text=f"{beat} – {scenes_in_beat}/{target}")
+                except Exception:
+                    pass
+
+                # Recent transitions (if you use _log_beat)
+                logs = st.session_state.get("beat_log", [])
+                if logs:
+                    st.caption("Recent beat events (latest last):")
+                    for r in logs[-10:]:
+                        ts = time.strftime("%H:%M:%S", time.localtime(r.get("t", 0)))
+                        evt = r.get("event")
+                        rest = {k: v for k, v in r.items() if k not in {"t", "event"}}
+                        st.write(f"{ts} — **{evt}** · {rest}")
+                else:
+                    st.caption("No beat events logged yet.")
+
+                c1, c2, c3 = st.columns(3)
+                if c1.button("Reset beat counters", key="dev_reset_beats"):
+                    st.session_state["_beat_scene_count"] = 0
+                    st.session_state["beat_index"] = 0
+                    st.session_state["story_complete"] = False
+                    st.success("Beat counters reset.")
+                if c2.button("Force next beat", key="dev_force_next_beat"):
+                    st.session_state["beat_index"] = min(st.session_state.get("beat_index", 0) + 1, len(BEATS) - 1)
+                    st.session_state["_beat_scene_count"] = 0
+                    st.info(f"Set beat to {BEATS[st.session_state['beat_index']]}")
+                if c3.button("Mark story complete", key="dev_mark_complete"):
+                    st.session_state["story_complete"] = True
+                    st.info("Marked story complete.")
 
             # --- Illustration diagnostics ---
             with st.expander("Illustration state", expanded=False):
