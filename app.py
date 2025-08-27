@@ -430,6 +430,21 @@ def _gentle_autorefresh_any_running(delay: float = 0.7, max_polls: int = 40) -> 
     time.sleep(delay)
     _soft_rerun()
 
+def _build_story_summary(history) -> str:
+    """Lightweight recap from existing assistant scenes; no LLM needed."""
+    try:
+        scenes = [m.get("content","") for m in history if m.get("role") == "assistant"]
+        if not scenes:
+            return "Your adventure concludes."
+        import re
+        full = " ".join(scenes).strip()
+        sents = re.split(r'(?<=[.!?])\s+', full)
+        if len(sents) <= 4:
+            return full
+        # first 2 + last 2 sentences with an ellipsis
+        return " ".join(sents[:2] + ["…"] + sents[-2:])
+    except Exception:
+        return "Your adventure concludes."
 
 def _soft_rerun():
     (getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None))()
@@ -706,21 +721,29 @@ def _advance_turn(pid: str, story_slot, sep_slot, illus_slot, grid_slot, anim_en
                 )
                 st.session_state["_beat_scene_count"] = 0
                 _log_beat("advance_beat", from_beat=current_beat, to_beat=get_current_beat(st.session_state))
-        # If story is complete, persist and show ending options, then return
-        if is_story_complete(st.session_state):
-            username  = st.session_state.get("player_name") or st.session_state.get("player_username") or None
-            gender    = st.session_state.get("player_gender")
-            archetype = st.session_state.get("player_archetype")
-            try:
-                save_snapshot(pid, full, [], st.session_state["history"], username=username, gender=gender, archetype=archetype)
-            except TypeError:
-                save_snapshot(pid, full, [], st.session_state["history"], username=username)
 
-            render_end_options(pid, grid_slot)  # your existing end-of-story panel
+        # === End conditions ===
+        if st.session_state.get("is_dead", False):
+            # Terminal: show the death panel only
+            st.session_state["choices"] = []
+            render_death_options(pid, grid_slot)
             return
-    #username = st.session_state.get("player_name") or st.session_state.get("player_username")
-    #gender   = st.session_state.get("player_gender")
-    #arch     = st.session_state.get("player_archetype")
+
+        if is_story_complete(st.session_state):
+            # Terminal: no buttons; stash recap HTML for the next render pass
+            st.session_state["choices"] = []
+
+            recap = _build_story_summary(st.session_state.get("history", [])) if "_build_story_summary" in globals() else "Your adventure concludes."
+            st.session_state["__recap_html"] = f"""
+                <div class="story-summary" style="margin-top:.6rem;padding:.9rem 1.1rem;border:1px solid rgba(49,51,63,.18);
+                    border-radius:8px;background:var(--secondary-background-color);line-height:1.6">
+                <h4 style="margin:.1rem 0 .55rem 0;">Story Concludes:</h4>
+                <p style="margin:0 0 .65rem 0;">{recap}</p>
+                <p style="margin:0;opacity:.8">Use the <b>sidebar</b> to <i>Start a New Story</i> or <i>Reset</i> the session.</p>
+                </div>
+            """
+            return
+
 
     last_img = st.session_state.get("last_illustration_url")
 
@@ -1138,13 +1161,35 @@ def main():
                       unsafe_allow_html=True)
     _render_separator(sep_ph)
 
-    # Render choices NOW so they remain visible during any gentle reruns
-    choices_ph.markdown('<div class="choices-band"></div>', unsafe_allow_html=True)
-    render_choices_grid(choices_ph,
-                        choices=st.session_state.get("choices", []),
-                        generating=False,
-                        count=CHOICE_COUNT)
-    st.session_state["t_choices_visible_at"] = time.time()
+    # If the arc is complete, show the recap (written below the last illustration) and stop.
+    if is_story_complete(st.session_state):
+        html = st.session_state.get("__recap_html")
+        if not html:
+            # Fallback if not prebuilt
+            recap = _build_story_summary(st.session_state.get("history", [])) if "_build_story_summary" in globals() else "Your adventure concludes."
+            html = f"""
+                <div class="story-summary" style="margin-top:.6rem;padding:.9rem 1.1rem;border:1px solid rgba(49,51,63,.18);
+                    border-radius:8px;background:var(--secondary-background-color);line-height:1.6">
+                <h4 style="margin:.1rem 0 .55rem 0;">Story Concludes:</h4>
+                <p style="margin:0 0 .65rem 0;">{recap}</p>
+                <p style="margin:0;opacity:.8">Use the <b>sidebar</b> to <i>Start a New Story</i> or <i>Reset</i> the session.</p>
+                </div>
+            """
+        choices_ph.markdown(html, unsafe_allow_html=True)
+        return
+
+
+    if not st.session_state.get("is_dead", False) and not is_story_complete(st.session_state):
+        choices_ph.markdown('<div class="choices-band"></div>', unsafe_allow_html=True)
+        render_choices_grid(
+            choices_ph,
+            choices=st.session_state.get("choices", []),
+            generating=False,
+            count=CHOICE_COUNT
+        )
+        st.session_state["t_choices_visible_at"] = time.time()
+    else:
+        choices_ph.empty()
 
     if not st.session_state.get("display_illustration_url"):
         try:
