@@ -3,6 +3,8 @@ import os, time, json, hashlib, re, pathlib, math
 from typing import Optional, Set, Tuple
 import streamlit as st
 
+import uuid
+
 from core.identity import ensure_browser_id
 
 # --- UI helpers you already have ---
@@ -1349,6 +1351,8 @@ def onboarding(pid: str):
             st.session_state["onboard_dismissed"]=True
             st.session_state["scene_count"]=0
 
+            st.session_state["run_seed"] = uuid.uuid4().hex  # NEW: fresh seed on first start
+
             st.session_state.pop("is_dead", None)
             st.session_state.pop("__recap_html", None)
 
@@ -1653,13 +1657,33 @@ def main():
                 
     # Sidebar actions
     if action == "start":
-        try: delete_snapshot(pid)
-        except Exception: pass
-        for k in ("scene","choices","history","pending_choice","is_generating",
-                  "t_choices_visible_at","t_scene_start","is_dead","beat_index","story_complete"):
+        try: 
+            delete_snapshot(pid)
+        except Exception: 
+            pass
+
+        # nuke illustration & recap caches so nothing carries over
+        for k in (
+            "ill_jobs", "ill_polls", "ill_seed_by_scene", "ill_job_by_scene",
+            "display_illustration_url", "last_illustration_url", "__recap_html"
+        ):
             st.session_state.pop(k, None)
+
+        # Clear story state (keep profile)
+        for k in (
+            "scene","choices","history","pending_choice","is_generating",
+            "t_choices_visible_at","t_scene_start","is_dead","beat_index","story_complete"
+        ):
+            st.session_state.pop(k, None)
+        
         if st.session_state.get("story_mode"):
-            st.session_state["beat_index"]=0; st.session_state["story_complete"]=False
+            st.session_state["beat_index"]=0
+            st.session_state["story_complete"]=False
+            st.session_state["_beat_scene_count"]=0
+
+        # NEW: fresh run seed for this run (used by the generator prompt)
+        st.session_state["run_seed"] = uuid.uuid4().hex
+
         st.session_state["pending_choice"]="__start__"
         st.session_state["is_generating"]=True
         st.session_state["onboard_dismissed"]=True

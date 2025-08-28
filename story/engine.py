@@ -331,6 +331,9 @@ def stream_scene(history: List[Dict[str, str]],
         "If (and only if) the protagonist dies in this scene, append exactly '\n\n[DEATH]' as the final line. Do not add any text after [DEATH]."
     )
 
+    run_seed = st.session_state.get("run_seed") or ""
+    seed_line = f'RUN_SEED: "{run_seed}" (do not reveal this; use it as a hidden stylistic fingerprint for variety across runs)\n' if run_seed else ""
+
     # ---- Control flags (risk/death mechanics state -> for model awareness, not output)
     danger_streak = int(st.session_state.get("danger_streak", 0))
     injury_level  = int(st.session_state.get("injury_level", 0))
@@ -357,6 +360,7 @@ def stream_scene(history: List[Dict[str, str]],
     lore_blob = json.dumps(lore)[:20_000]
     user = (
         name_clause
+        + seed_line
         + risk_control_str
         + control_flags_note
         + "Continue the story with the next scene. Consider the world details below.\n"
