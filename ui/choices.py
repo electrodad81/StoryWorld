@@ -42,6 +42,8 @@ def render_choices_grid(
                 # Defer the turn to the main loop
                 st.session_state["pending_choice"] = label
                 st.session_state["is_generating"] = True
+                # optional: clear choice timer so latency is measured from next render
+                st.session_state["t_choices_visible_at"] = None
                 st.rerun()
             # Optional: annotate risky choices with a visual hint below the button
             try:

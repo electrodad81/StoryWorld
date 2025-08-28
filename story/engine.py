@@ -1,6 +1,9 @@
-from typing import List, Dict, Generator, Optional
+from typing import List, Dict, Generator, Optional, Tuple, Set
 import json
 import os
+import re
+import random
+import time
 
 import streamlit as st
 from openai import OpenAI
@@ -11,50 +14,218 @@ client = OpenAI()
 # ----------------------------------------------------------------------------- 
 # Illustration helper
 # -----------------------------------------------------------------------------
-from typing import Optional, Tuple, Dict
 
-from typing import Optional, Tuple, Dict
+# ---------------- Image prompt safety helpers ----------------
+
+# Words/phrases we want to down-tone for image gen (not for story text)
+_REPLACEMENTS = {
+    # graphic violence / gore
+    r"\b(blood|bloody|bloodied|gore|gory|guts|entrails|viscera|corpse|cadaver|mutilated|severed|dismembered|decapitat\w*)\b": "damage",
+    r"\b(wound|wounded|bleed\w*|stab\w*|slash\w*|maim\w*|butcher\w*|impale\w*)\b": "injury",
+    r"\b(skull|brain|decay|rotting|putrid)\b": "remains",
+    # sexual / nudity
+    r"\b(nude|nudity|breast\w*|genital\w*|erotic|sexual|sex|porn\w*)\b": "tasteful attire",
+    # self-harm or extreme
+    r"\b(suicide|self[-\s]?harm|hang(ed|ing)|cutting)\b": "danger",
+    # weapons → neutral descriptions
+    r"\b(shotgun|rifle|pistol|gun|revolver|assault rifle|uzi|ak-?47)\b": "weapon",
+    r"\b(grenade|bomb|explosive\w*)\b": "dangerous device",
+}
+
+# Sentences containing these get *omitted* at higher safety levels
+_HARD_FILTER = [
+    r"\bsever(ed|ing)\b", r"\bdismember(ed|ment)\b", r"\bdecapitat\w*\b",
+    r"\bguts\b", r"\bentrails\b", r"\bviscera\b", r"\bgraphic\b",
+    r"\bsex|sexual|erotic\b", r"\bnude|nudity\b",
+]
+
+# Keep prompt short & visual
+_MAX_TOKENS_APPROX = 120  # rough char budget; DALL·E likes concise prompts
+
+# put this just above or inside generate_illustration (module-scope is fine)
+def _gender_visual_directive(gender: Optional[str]) -> str:
+    g = (gender or "").strip().lower()
+    if g == "male":
+        return ("If the protagonist appears, depict a masculine-presenting silhouette or attire. "
+                "No facial details. Avoid stereotypes; keep clothing practical.")
+    if g == "female":
+        return ("If the protagonist appears, depict a feminine-presenting silhouette or attire. "
+                "No facial details. Avoid sexualization; keep clothing practical.")
+    if g == "nonbinary":
+        return ("If the protagonist appears, depict an androgynous silhouette with neutral attire. "
+                "No facial details. Avoid gendered cues or stereotypes.")
+    # unspecified/unknown
+    return ("If the protagonist appears, keep the silhouette gender-ambiguous with neutral attire. "
+            "No facial details.")
 
 def generate_illustration(scene: str, simple: bool = True) -> Tuple[Optional[str], Dict]:
     """
     Generate an illustration. Returns (image_ref, debug).
     image_ref is a data: URL (base64), a remote URL, or None.
-    """
-    dbg: Dict = {"summary": None, "attempts": [], "simple": simple}
 
+    - Uses ONLY basic style.
+    - Progressive prompt sanitization (levels 1→3) to satisfy safety.
+    - Final fallback: environment-only prompt.
+    - Respects a global ILLUSTRATIONS_ENABLED kill-switch if defined elsewhere.
+    """
+    import re, time  # local import so you can paste this function as-is
+    dbg: Dict = {"summary": None, "attempts": [], "simple": True}
+
+    # ---- Optional global kill switch (define ILLUSTRATIONS_ENABLED elsewhere) ----
+    enabled = globals().get("ILLUSTRATIONS_ENABLED", True)
+    if not enabled:
+        summary = (scene or "").split(".")[0].strip()
+        dbg.update({
+            "summary": summary,
+            "disabled": True,
+            "note": "Image generation disabled via ILLUSTRATIONS_ENABLED.",
+        })
+        return None, dbg
+
+    # ---- Seed summary (keep your current behavior) ----
     summary = (scene or "").split(".")[0].strip()
     dbg["summary"] = summary
+    try:
+        # read from session; if you prefer, accept `gender` as a function arg instead
+        gender_choice = st.session_state.get("player_gender", "Unspecified")
+    except Exception:
+        gender_choice = "Unspecified"
+
+    gdir = _gender_visual_directive(gender_choice)
     if not summary:
         dbg["error"] = "empty_summary"
         return None, dbg
 
-    # Two prompt styles: "simple" for CYOA-like line art, "detailed" as fallback
-    if simple:
-        style_prompt = (
-            "Simple, clean black-and-white line-and-wash with a single colored highlight. Minimal hatching, clear contours, "
-            "single focal subject, medium or close-up shot. Lighthearted adventure tone. "
-            "the background behind the image subject should be plain white, "
-            "lightly intricate textures, careful crosshatching, no gore, no guns, no modern tech, no text. " \
-            "Do not show the protagonist's face directly." 
-        )
-    else:
-        style_prompt = (
-            "Highly detailed black-and-white pen-and-ink illustration with careful hatching. "
-            "Dark-fantasy mood, PG-13. Keep composition readable and not overly cluttered."
+    # ---- Basic style only ----
+    def _basic_style() -> str:
+        return (
+            "Simple, clean black-and-white line-and-wash with a single colored highlight. "
+            "Minimal hatching, clear contours, single focal subject, medium or close-up shot. "
+            "Lighthearted adventure tone. The background behind the image subject should be plain white. "
+            "Careful crosshatching. Do not show the protagonist's face directly."
         )
 
-    prompt = f"{style_prompt} Scene: {summary}."
+    # ---- Sanitizer (levels 1→3 increase safety) ----
+    _REPLACEMENTS = [
+        # (pattern, replacement)
+        (r"\b(blood|bloody|bloodied|gore|gory|guts|entrails|viscera|corpse|cadaver|mutilated|severed|dismembered|decapitat\w*)\b", "damage"),
+        (r"\b(wound|wounded|bleed\w*|stab\w*|slash\w*|maim\w*|butcher\w*|impale\w*)\b", "injury"),
+        (r"\b(skull|brain|decay|rotting|putrid)\b", "remains"),
+        (r"\b(nude|nudity|breast\w*|genital\w*|erotic|sexual|sex|porn\w*)\b", "tasteful attire"),
+        (r"\b(suicide|self[-\s]?harm|hang(ed|ing)|cutting)\b", "danger"),
+        (r"\b(shotgun|rifle|pistol|gun|revolver|assault rifle|uzi|ak-?47)\b", "weapon"),
+        (r"\b(grenade|bomb|explosive\w*)\b", "dangerous device"),
+    ]
+    _HARD_FILTER = [
+        r"\bsever(ed|ing)\b", r"\bdismember(ed|ment)\b", r"\bdecapitat\w*\b",
+        r"\bguts\b", r"\bentrails\b", r"\bviscera\b", r"\bgraphic\b",
+        r"\bsex|sexual|erotic\b", r"\bnude|nudity\b",
+    ]
 
-    size = "1024x1024"  # required valid size
+    def _strip_quotes(s: str) -> str:
+        return s.replace("“", "\"").replace("”", "\"").replace("’", "'").replace("‘", "'")
 
-    for model_name in ("gpt-image-1", "dall-e-3"):
-        attempt = {"model": model_name, "size": size, "simple": simple}
+    def _truncate(s: str, n: int = 400) -> str:
+        s = re.sub(r"\s+", " ", s).strip()
+        return s if len(s) <= n else s[:n].rsplit(" ", 1)[0] + "…"
+
+    def _sanitize(text: str, level: int) -> str:
+        """
+        level 1: replace problematic terms
+        level 2: replace + drop sentences with hard filters
+        level 3: abstract → environment/setting only
+        """
+        src = _strip_quotes(text or "")
+        if level >= 1:
+            for pat, repl in _REPLACEMENTS:
+                src = re.sub(pat, repl, src, flags=re.IGNORECASE)
+
+        if level >= 2:
+            sents = re.split(r'(?<=[.!?])\s+', src)
+            keep = []
+            for s in sents:
+                low = s.lower()
+                if any(re.search(p, low) for p in _HARD_FILTER):
+                    continue
+                keep.append(s)
+            src = " ".join(keep) if keep else "mysterious scene, danger implied but not shown"
+
+        if level >= 3:
+            # Environment-only, no distress; keep it short and visual.
+            src = ("atmospheric fantasy environment, focus on landscape, architecture and props; "
+                   "no depiction of injuries or explicit danger")
+
+        safety = "family-friendly, PG-13, no gore, no explicit injuries, no nudity"
+        return _truncate(f"{src}. {safety}.")
+
+    def _build_prompt(seed: str, level: int) -> str:
+        style = _basic_style()
+        safe = _sanitize(seed, level)
+        # Keep it visual; avoid literal reenactment of violence
+        return f"{style} Depict the scene mood and setting with tasteful restraint. {safe} {gdir}"
+
+    size = "1024x1024"
+    models = ("dall-e-3",)  # avoid gpt-image-1 (403 in your org)
+
+    # Try levels 1→3 (increasingly safe), only with dall-e-3.
+    for level in (1, 2, 3):
+        prompt = _build_prompt(summary, level)
+        for model_name in models:
+            attempt = {"model": model_name, "size": size, "level": level, "prompt": prompt}
+            try:
+                resp = client.images.generate(
+                    model=model_name,
+                    prompt=prompt,
+                    size=size,
+                    # quality="standard",
+                )
+                data = getattr(resp, "data", None)
+                attempt["has_data"] = bool(data)
+                if data:
+                    item = data[0]
+                    b64 = getattr(item, "b64_json", None)
+                    if b64:
+                        dbg["attempts"].append({**attempt, "has_b64": True, "ok": True})
+                        return "data:image/png;base64," + b64, dbg
+                    url = getattr(item, "url", None)
+                    if url:
+                        dbg["attempts"].append({**attempt, "has_url": True, "ok": True})
+                        return url, dbg
+                # no data, but call succeeded
+                dbg["attempts"].append({**attempt, "ok": True, "note": "no data in response"})
+            except Exception as e:
+                msg = repr(e)
+                attempt["ok"] = False
+                attempt["error"] = msg
+                dbg["attempts"].append(attempt)
+                # If it's a policy rejection, escalate to the next level
+                if ("content_policy_violation" in msg
+                        or "Your request was rejected" in msg
+                        or "safety system" in msg):
+                    continue
+                # If it's a permission / org verification issue, don't spin further
+                if ("PermissionDeniedError" in msg
+                        or "must be verified" in msg
+                        or "Error code: 403" in msg):
+                    dbg["permission_error"] = True
+                    return None, dbg
+                # Other errors → try next level/model anyway
+        time.sleep(0.25)  # tiny backoff between levels
+
+    # Final fallback: very tame environment prompt
+    fallback_prompt = (
+        f"{_basic_style()} "
+        "Atmospheric fantasy environment, tranquil mood; focus on scenery and architecture; "
+        "no characters in distress, no injuries, no weapons; family-friendly, PG-13. "
+        f"{gdir}"
+    )
+    for model_name in models:
+        attempt = {"model": model_name, "size": size, "level": "fallback_env", "prompt": fallback_prompt}
         try:
             resp = client.images.generate(
                 model=model_name,
-                prompt=prompt,
+                prompt=fallback_prompt,
                 size=size,
-                # quality="standard",  # optional
             )
             data = getattr(resp, "data", None)
             attempt["has_data"] = bool(data)
@@ -62,11 +233,11 @@ def generate_illustration(scene: str, simple: bool = True) -> Tuple[Optional[str
                 item = data[0]
                 b64 = getattr(item, "b64_json", None)
                 if b64:
-                    dbg["attempts"].append({**attempt, "has_b64": True})
+                    dbg["attempts"].append({**attempt, "has_b64": True, "ok": True})
                     return "data:image/png;base64," + b64, dbg
                 url = getattr(item, "url", None)
                 if url:
-                    dbg["attempts"].append({**attempt, "has_url": True})
+                    dbg["attempts"].append({**attempt, "has_url": True, "ok": True})
                     return url, dbg
             dbg["attempts"].append({**attempt, "ok": True, "note": "no data in response"})
         except Exception as e:
@@ -76,6 +247,9 @@ def generate_illustration(scene: str, simple: bool = True) -> Tuple[Optional[str
 
     dbg["error"] = "all_attempts_failed"
     return None, dbg
+# -----------------------------------------------------------------------------
+# Story generation helpers
+
 
 def _history_text(history: List[Dict[str, str]]) -> str:
     """Flatten chat history into a string for prompting."""
@@ -88,44 +262,78 @@ def _history_text(history: List[Dict[str, str]]) -> str:
         lines.append(f"{role.upper()}: {content}")
     return "\n".join(lines[-40:])  # Keep last 40 entries
 
+# Beat-specific generation guidelines (closure rules baked in)
+BEAT_GUIDELINES = {
+    "exposition": (
+        "Open in motion; establish POV, desire, and a concrete obstacle. "
+        "Plant an opening image to echo later. Avoid >2 sentences of backstory."
+    ),
+    "rising_action": (
+        "Escalate with 1–2 concrete complications that corner the protagonist. "
+        "Narrow options; raise stakes. Introduce at most one minor element."
+    ),
+    "climax": (
+        "Force a single, irreversible decision. Make the price/cost explicit. "
+        "No new locations or characters; cash the promise of the hook."
+    ),
+    "falling_action": (
+        "Show immediate, visible consequences in the world. Resolve dangling promises. "
+        "No new mysteries or hooks; compress time if needed."
+    ),
+    "resolution": (
+        "Answer the central question (yes / no / yes-but / no-and). "
+        "Echo the opening image in a changed way. State the internal change in one clear line. "
+        "End on a specific sensory image. No next-scene hooks; no choices."
+    ),
+}
+
+def _opening_image_hint(history) -> str:
+    # very light heuristic: first assistant scene's first sentence
+    try:
+        first = next(m["content"] for m in history if m.get("role") == "assistant")
+        import re
+        sent = re.split(r'(?<=[.!?])\s+', first.strip())[0]
+        return sent[:160]
+    except StopIteration:
+        return ""
+
+def _compose_prompt(history: List[Dict], lore: Dict, beat: Optional[str]) -> str:
+    base = (
+        "Write the next short scene in a self-contained short story. "
+        "Keep scenes concise and concrete; avoid summarizing future events."
+    )
+    guide = BEAT_GUIDELINES.get(beat or "", "")
+    opener = _opening_image_hint(history)
+    extra = (f' Opening image to echo later: "{opener}".' if opener else "")
+    return f"{base}\n\nBeat: {beat or 'classic'}.\nGuidelines: {guide}{extra}"
+
 
 def stream_scene(history: List[Dict[str, str]],
                  lore: Dict,
                  beat: Optional[str] = None) -> Generator[str, None, None]:
     """
     Streams a scene for the interactive story. If `beat` is provided (Story Mode),
-    injects a brief line of guidance appropriate to the beat. If `beat` is None,
+    injects brief guidance appropriate to the beat. If `beat` is None,
     the scene is generated in classic freeform mode.
     """
-    # System prompt: style and constraints with consequence contract
-    sys = (
+    # ---- Beat-aware guidance composed at module scope via _compose_prompt(..)
+    # (uses BEAT_GUIDELINES + opening-image echo)
+    prompt = _compose_prompt(history, lore, beat)
+
+    # ---- System style + consequence contract (kept from your version)
+    sys_base = (
         "You are the narrative engine for a PG dark-fantasy interactive story called Gloamreach.\n"
         "Write in present tense, second person. Do not name the protagonist; if a Name exists, it may appear only in NPC dialogue.\n"
-        "Keep prose tight by default (~85–150 words single paragraph). Maintain continuity with prior scenes.\n"
+        "Keep prose tight by default (~85–150 words, single paragraph). Maintain continuity with prior scenes.\n"
         # Consequence contract ensures risky choices have visible costs and escalating setbacks
         "Consequence contract: If the last player choice was risky, show a visible cost in THIS scene (wound, gear loss, time pressure, ally setback, exposure to threat). Do NOT undo it immediately. "
         "If the player chose risky paths in two consecutive scenes, escalate to a serious setback (capture, grave wound, loss). Only when fictionally fitting, you may kill the protagonist.\n"
-        "If (and only if) the protagonist dies in this scene, append exactly '\n\n[DEATH]' as the final line. Do not add any text after [DEATH].\n"
+        "If (and only if) the protagonist dies in this scene, append exactly '\n\n[DEATH]' as the final line. Do not add any text after [DEATH]."
     )
 
-    # Beat guidance (Story Mode only)
-    beat_map = {
-        "exposition":     "Focus on world-building, character intro, and foreshadowing.",
-        "rising_action":  "Escalate conflict and tension; reveal complications and risky options.",
-        "climax":         "High-stakes confrontation; decisive outcomes. Allow real peril.",
-        "falling_action": "Show the aftermath and consequences of the climax; start tying threads.",
-        "resolution":     "Summarize the journey, provide emotional closure, and hint at replay."
-    }
-    beat_line = ""
-    if beat and beat in beat_map:
-        beat_line = f"BEAT GUIDANCE: {beat_map[beat]}\n"
-
-    # Control flags placeholder (risk/death mechanics can be implemented separately)
-    # Risk & consequence control flags: compute current danger streak and injury level. If two risky
-    # choices in a row have been taken, must_escalate will be true. These are exposed to the model
-    # but never shown to the player directly.
+    # ---- Control flags (risk/death mechanics state -> for model awareness, not output)
     danger_streak = int(st.session_state.get("danger_streak", 0))
-    injury_level = int(st.session_state.get("injury_level", 0))
+    injury_level  = int(st.session_state.get("injury_level", 0))
     risk_flags = {
         "allow_fail_state": True,
         "danger_streak": danger_streak,
@@ -135,51 +343,51 @@ def stream_scene(history: List[Dict[str, str]],
     try:
         risk_control_str = f"CONTROL FLAGS: {json.dumps(risk_flags)}\n"
     except Exception:
-        # Fallback: if json.dumps fails (should not), use repr
         risk_control_str = f"CONTROL FLAGS: {risk_flags}\n"
+    control_flags_note = "Do not expose control flags; they are for you only.\n"
 
-    control_flags = (
-        "Do not expose control flags; they are for you only.\n"
-    )
-
-    # Name clause: provide the player's name for NPC dialogue only. If no name is present,
-    # instruct the model to avoid using a name (use 'you' only).
+    # ---- Player name usage rule
     player_name = st.session_state.get("player_name") or st.session_state.get("player_username") or ""
     if player_name:
         name_clause = f"Player name (for NPC dialogue only): {player_name}\n"
     else:
         name_clause = "No name is provided. Do not address the protagonist by any name; use 'you' only.\n"
 
+    # ---- Lore + history
     lore_blob = json.dumps(lore)[:20_000]
     user = (
-        name_clause +
-        risk_control_str +
-        control_flags +
-        beat_line +
-        "Continue the story by one beat. Consider the world details below.\n"
+        name_clause
+        + risk_control_str
+        + control_flags_note
+        + "Continue the story with the next scene. Consider the world details below.\n"
         f"--- LORE JSON ---\n{lore_blob}\n--- END LORE ---\n\n"
         "Player history (latest last):\n"
         f"{_history_text(history)}\n\n"
-        # Guidance on output format
+        # Output guardrails
         "Output text in second person, present tense.\n"
         "Length: ~85–150 words. End cleanly; do not start a new paragraph."
     )
 
-    # Streaming call
+    # ---- Streaming call (now includes beat-aware prompt in the SYSTEM content)
     resp = client.chat.completions.create(
         model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         temperature=0.9,
         max_tokens=350,
         stream=True,
         messages=[
-            {"role": "system", "content": sys},
+            {"role": "system", "content": sys_base + "\n\n" + prompt},  # <-- incorporate _compose_prompt(..)
             {"role": "user", "content": user},
         ],
     )
-    for ev in resp:
-        if ev.choices and ev.choices[0].delta and ev.choices[0].delta.content:
-            yield ev.choices[0].delta.content
 
+    for ev in resp:
+        if getattr(ev, "choices", None):
+            delta = getattr(ev.choices[0], "delta", None)
+            if delta and getattr(delta, "content", None):
+                yield delta.content
+
+# -----------------------------------------------------------------------------
+# SQLite storage helpers
 
 def generate_choices(history: List[Dict[str, str]],
                      last_scene: str,
@@ -231,3 +439,70 @@ def generate_choices(history: List[Dict[str, str]],
         return cleaned[:2]
     except Exception:
         return ["Press on", "Hold back"]
+    
+def _basic_style_clause(simple: bool) -> str:
+    if simple:
+        return ("black-and-white line art, clean inked outlines, minimal shading, "
+                "storybook illustration, high contrast, centered composition")
+    return ("painterly fantasy illustration, soft light, cinematic composition, "
+            "rich texture, professional artbook style")
+
+def _strip_quotes(s: str) -> str:
+    return s.replace("“", "\"").replace("”", "\"").replace("’", "'").replace("‘", "'")
+
+def _truncate_chars(s: str, n: int) -> str:
+    s = re.sub(r"\s+", " ", s).strip()
+    return s if len(s) <= n else s[:n].rsplit(" ", 1)[0] + "…"
+
+def _soft_sanitize(text: str, level: int) -> str:
+    """
+    level 1: replace problematic terms
+    level 2: replace + drop sentences with hard filters
+    level 3: heavily abstract → setting/items only
+    """
+    src = _strip_quotes(text or "")
+    if level >= 1:
+        for pat, repl in _REPLACEMENTS.items():
+            src = re.sub(pat, repl, src, flags=re.IGNORECASE)
+
+    if level >= 2:
+        # remove sentences that still contain hard patterns
+        sents = re.split(r'(?<=[.!?])\s+', src)
+        safe_sents = []
+        for s in sents:
+            low = s.lower()
+            if any(re.search(p, low) for p in _HARD_FILTER):
+                continue
+            safe_sents.append(s)
+        src = " ".join(safe_sents) if safe_sents else "mysterious scene"
+
+    if level >= 3:
+        # extract a gentle environment + subject sketch
+        # keep only nouns-ish words; drop people-injury specifics
+        words = re.findall(r"[a-zA-Z][a-zA-Z\-']+", src)
+        keep = []
+        banned = {"injury","damage","remains","weapon","danger","kill","dead","death","corpse"}
+        for w in words:
+            lw = w.lower()
+            if lw in banned: 
+                continue
+            if len(lw) <= 2:
+                continue
+            keep.append(w)
+        # fallback scene
+        if not keep:
+            src = "misty forest clearing with ancient stones and soft moonlight"
+        else:
+            src = " ".join(keep[:40])
+
+    # Always add a friendly safety clause and style guidance
+    safety = ("family-friendly, PG-13, no gore, no explicit injuries, no nudity, "
+              "suggestive elements are omitted")
+    src = _truncate_chars(src, 400)
+    return f"{src}. {safety}."
+
+def _build_image_prompt(scene_text: str, simple: bool, level: int) -> str:
+    style = _basic_style_clause(simple)
+    safe = _soft_sanitize(scene_text, level)
+    return (f"{style}. Depict the scene mood and setting suggested here, with tasteful restraint. "
+            f"{safe}")

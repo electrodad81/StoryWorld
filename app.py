@@ -1,6 +1,6 @@
 # app.py
-import os, time, json, hashlib, re, pathlib
-from typing import Optional
+import os, time, json, hashlib, re, pathlib, math
+from typing import Optional, Set, Tuple
 import streamlit as st
 
 from core.identity import ensure_browser_id
@@ -281,30 +281,53 @@ def _scene_key(text: str, simple: bool) -> str:
     return f"ill-{h}"
 
 def _start_illustration_job(seed_sentence: str, simple: bool, scene_index: Optional[int] = None) -> str:
-    key = _scene_key(seed_sentence, simple)
+    # If called with a scene_index, block duplicates for that scene.
+    if scene_index is not None:
+        by_scene = st.session_state.setdefault("ill_job_by_scene", {})
+        if scene_index in by_scene:
+            return by_scene[scene_index]["key"]
+
+    key  = _scene_key(seed_sentence, simple)
     jobs = st.session_state.setdefault("ill_jobs", {})
+
     if key in jobs:
+        # already queued by seed; bind to scene if provided
+        if scene_index is not None:
+            st.session_state.setdefault("ill_job_by_scene", {})[scene_index] = {"key": key}
+            jobs[key]["scene_index"] = scene_index            # <-- add this
+        st.session_state["ill_last_key"] = key
         return key
 
     fut = _ill_executor().submit(generate_illustration, seed_sentence, simple)
     jobs[key] = {
         "future": fut,
         "result": None,
-        "seed": seed_sentence,
-        "simple": simple,
-        "scene_index": scene_index if scene_index is not None else (st.session_state.get("scene_count", 0) + 1),
-        "created_at": time.time(),
-        "completed_at": None,
+        "scene_index": scene_index,                           # <-- add this
     }
+    st.session_state["ill_jobs"] = jobs
     st.session_state["ill_last_key"] = key
+
+    if scene_index is not None:
+        st.session_state.setdefault("ill_job_by_scene", {})[scene_index] = {"key": key}
+
     return key
 
 def _job_for_scene(scene_text: str, simple: bool):
-    """Return (key, job_dict|None) for the *current* scene only."""
+    """Return (key, job_dict|None) for the *current* scene, preferring the frozen seed."""
+    jobs = st.session_state.get("ill_jobs", {})
+    scene_index = int(st.session_state.get("scene_count", 0))  # current scene index already rendered
+
+    # Prefer a scene-frozen seed
+    seed = st.session_state.get("ill_seed_by_scene", {}).get(scene_index)
+    if seed:
+        key = _scene_key(seed, simple)
+        return key, jobs.get(key)
+
+    # Fallback: derive from text (older behavior)
     seed = _has_first_sentence(scene_text) or (scene_text or "").strip()
     key  = _scene_key(seed, simple)
-    jobs = st.session_state.get("ill_jobs", {})
     return key, jobs.get(key)
+
 
 def _prune_old_jobs(keep_last_n: int = 8) -> None:
     jobs = st.session_state.get("ill_jobs", {})
@@ -470,7 +493,9 @@ _RISKY_WORDS = {
     "charge","attack","fight","steal","stab","break","smash","dive","jump",
     "descend","enter","drink","touch","open the","confront","cross","swim",
     "sprint","bait","ambush","bleed","sacrifice","shout","brave","risk",
-    "gamble","rush","kick","force","pry","ignite","set fire"
+    "gamble","rush","kick","force","pry","ignite","set fire","strike","fend off",
+    "probe", "sneak", "slip", "crawl", "descend", "climb", "edge",
+    "blade", "knife", "dagger", "strike", "thrust", "grapple", "flee"
 }
 def is_risky_label(label: str) -> bool:
     s = (label or "").lower()
@@ -492,6 +517,96 @@ def detect_cost_in_scene(text: str) -> bool:
         if w in (text or "").lower(): return True
     return False
 
+# ========= Contextual risk scoring (no API) =========
+import math
+
+# Verbs that imply force or exposure
+_AGGRESSIVE_VERBS = {
+    "attack","strike","swing","slash","thrust","stab","shoot","fire","charge","rush",
+    "kick","punch","grapple","wrestle","tackle","ambush","assault","raid","smash","break",
+    "confront","provoke","taunt","threaten","fight","engage",
+}
+# Weapons / implements
+_WEAPON_NOUNS = {
+    "sword","blade","dagger","knife","axe","mace","spear","bow","arrow","crossbow",
+    "club","hammer","whip","staff","shield","torch","weapon"
+}
+# Dangerous targets
+_HOSTILE_TARGETS = {
+    "monster","beast","creature","demon","spirit","ghost","fiend","warden","guard",
+    "soldier","bandit","assassin","cultist","sentinel","thing","lurker","stalker","wolf",
+}
+# Environmental hazards
+_ENV_HAZARDS = {
+    "chasm","abyss","cliff","ledge","pit","trap","snare","poison","toxin","curse","cursed",
+    "unstable","crumbling","rotting","mold","swamp","bog","quicksand","maelstrom","blizzard",
+    "storm","lightning","fire","flames","inferno","eruption","collapse","avalanche",
+}
+# Caution / de-escalation
+_DEESCALATE = {"parley","talk","negotiate","bargain","plead","hide","sneak","retreat","withdraw","evade","observe","wait","listen","watch"}
+
+def _tokens(s: str) -> Set[str]:
+    return set(w.lower() for w in re.findall(r"[a-zA-Z][a-zA-Z\-']+", s or ""))
+
+def _context_risk_score(choice: str, scene_text: str) -> Tuple[float, str]:
+    """
+    Heuristic score 0..1 using verbs, objects, and scene context.
+    Returns (score, reason).
+    """
+    c = _tokens(choice)
+    s = _tokens(scene_text)
+
+    score = 0.0
+    reasons = []
+
+    # Aggressive verb → big signal
+    v_hits = c & _AGGRESSIVE_VERBS
+    if v_hits:
+        score += 0.45
+        reasons.append(f"aggressive verb: {', '.join(sorted(v_hits))}")
+
+    # Weapons → strong signal (especially with aggressive verb)
+    w_hits = c & _WEAPON_NOUNS
+    if w_hits:
+        score += 0.30
+        reasons.append(f"weapon: {', '.join(sorted(w_hits))}")
+        if v_hits:
+            score += 0.10  # synergy
+
+    # Hostile target mentioned → moderate signal
+    t_hits = c & _HOSTILE_TARGETS
+    if t_hits:
+        score += 0.18
+        reasons.append(f"hostile target: {', '.join(sorted(t_hits))}")
+
+    # Scene hazard context + overlap with choice → boost
+    h_scene = s & _ENV_HAZARDS
+    h_choice = c & _ENV_HAZARDS
+    if h_choice or (h_scene and (c & (h_scene | _HOSTILE_TARGETS))):
+        score += 0.18
+        reasons.append("environmental hazard context")
+
+    # De-escalation verbs reduce risk
+    d_hits = c & _DEESCALATE
+    if d_hits:
+        score -= 0.25
+        reasons.append(f"de-escalate: {', '.join(sorted(d_hits))}")
+
+    # Generic exposure verbs (move, enter, descend, climb) as small bump if scene looks dangerous
+    _expose = {"enter","descend","climb","cross","advance","approach","step","move","drop","jump"}
+    e_hits = c & _expose
+    if e_hits and (h_scene or (s & _HOSTILE_TARGETS)):
+        score += 0.10
+        reasons.append("exposure in dangerous scene")
+
+    # Clamp
+    score = max(0.0, min(1.0, score))
+    return score, "; ".join(reasons) or "neutral"
+
+
+
+# =============================================================================
+# Render helpers: death / end options
 def render_death_options(pid: str, slot) -> None:
     with slot.container():
         st.subheader("Your journey ends here.")
@@ -510,6 +625,8 @@ def render_death_options(pid: str, slot) -> None:
             if st.session_state.get("story_mode"):
                 st.session_state["beat_index"] = 0
                 st.session_state["story_complete"] = False
+            st.session_state.pop("is_dead", None)
+            st.session_state.pop("__recap_html", None)
             st.session_state["pending_choice"] = "__start__"
             st.session_state["is_generating"] = True
             _soft_rerun()
@@ -532,6 +649,9 @@ def render_end_options(pid: str, slot) -> None:
             if st.session_state.get("story_mode"):
                 st.session_state["beat_index"] = 0
                 st.session_state["story_complete"] = False
+
+            st.session_state.pop("is_dead", None)
+            st.session_state.pop("__recap_html", None)
             st.session_state["pending_choice"] = "__start__"
             st.session_state["is_generating"] = True
             _soft_rerun()
@@ -598,7 +718,18 @@ def ensure_keys():
     st.session_state.setdefault("beat_log", [])
     # --- persistent illustration buffer ---
     st.session_state.setdefault("display_illustration_url", None)
+    st.session_state.setdefault("ill_seed_by_scene", {})  # {scene_index: seed}
+    st.session_state.setdefault("ill_job_by_scene", {})   # {scene_index: {"key": str}}
 
+def _freeze_seed_for_scene(scene_index: int, text: str) -> str:
+    seeds = st.session_state.setdefault("ill_seed_by_scene", {})
+    if scene_index in seeds:
+        return seeds[scene_index]
+    seed = _has_first_sentence(text) or " ".join((text or "").split()[:18]) + "…"
+    seed = (seed or "").strip()
+    seeds[scene_index] = seed
+    st.session_state["ill_seed_by_scene"] = seeds
+    return seed
 
 def reset_session(full_reset=False):
     keep={}
@@ -620,7 +751,13 @@ def reset_session(full_reset=False):
 # Beats
 # =============================================================================
 BEATS=["exposition","rising_action","climax","falling_action","resolution"]
-BEAT_TARGET_SCENES={"exposition":2,"rising_action":3,"climax":2,"falling_action":2,"resolution":1}
+
+BEAT_TARGET_SCENES={"exposition":2,
+                    "rising_action":3,
+                    "climax":2,
+                    "falling_action":2,
+                    "resolution":1}
+
 def get_current_beat(state)->str:
     i=int(state.get("beat_index",0)); i=max(0,min(i,len(BEATS)-1)); return BEATS[i]
 def mark_story_complete(): st.session_state["story_complete"]=True
@@ -631,123 +768,206 @@ def is_story_complete(state)->bool: return bool(state.get("story_complete",False
 # (illustration itself is rendered in the regular render path to avoid flicker)
 # =============================================================================
 def _advance_turn(pid: str, story_slot, sep_slot, illus_slot, grid_slot, anim_enabled: bool=True):
-    old_choices=list(st.session_state.get("choices",[]))
-    picked=st.session_state.get("pending_choice")
+    old_choices = list(st.session_state.get("choices", []))
+    picked = st.session_state.get("pending_choice")
 
-    # record user choice
-    if picked and picked!="__start__":
-        hist=st.session_state["history"]
-        if not hist or hist[-1].get("role")!="user" or hist[-1].get("content")!=picked:
-            hist.append({"role":"user","content":picked})
-        visible_at=st.session_state.get("t_choices_visible_at")
-        latency_ms=int((time.time()-visible_at)*1000) if visible_at else None
-        save_event(pid,"choice",{
-            "label":picked,
-            "index":(old_choices.index(picked) if picked in old_choices else None),
-            "latency_ms":latency_ms,
-            "decisions_count":sum(1 for m in hist if m.get("role")=="user"),
+    # --- Contextual risk update for the *previous* turn (based on old_choices & previous scene) ---
+    if picked and picked != "__start__":
+        prev_scene = st.session_state.get("scene", "") or ""
+        riskmap_prev = st.session_state.get("choice_risk_map", {}) or {}
+
+        # If no map was computed (e.g., first choice), derive it from old_choices now
+        if not riskmap_prev and old_choices:
+            tmp = {}
+            for label in old_choices:
+                sc, why = _context_risk_score(label, prev_scene)
+                tier = "high" if sc >= 0.66 else ("medium" if sc >= 0.33 else "low")
+                tmp[label] = {"score": sc, "tier": tier, "reason": why}
+            riskmap_prev = tmp
+            st.session_state["choice_risk_map"] = riskmap_prev
+
+        r = riskmap_prev.get(picked, {})
+        sc = float(r.get("score", 0.0))
+
+        # danger_streak from contextual risk (no probabilistic death roll here)
+        if sc >= 0.50:
+            st.session_state["danger_streak"] = st.session_state.get("danger_streak", 0) + 1
+        elif sc <= 0.20:
+            st.session_state["danger_streak"] = max(0, st.session_state.get("danger_streak", 0) - 1)
+
+        # expose to dev
+        st.session_state["last_pick_label"] = picked
+        st.session_state["last_pick_risky"] = (sc >= 0.50)
+        st.session_state["last_pick_risk_score"] = sc
+        st.session_state["last_pick_risk_reason"] = r.get("reason", "")
+
+        # record user choice (telemetry)
+        hist = st.session_state["history"]
+        if (not hist) or hist[-1].get("role") != "user" or hist[-1].get("content") != picked:
+            hist.append({"role": "user", "content": picked})
+        visible_at = st.session_state.get("t_choices_visible_at")
+        latency_ms = int((time.time() - visible_at) * 1000) if visible_at else None
+        try:
+            idx = old_choices.index(picked)
+        except ValueError:
+            idx = None
+        save_event(pid, "choice", {
+            "label": picked,
+            "index": idx,
+            "risky": (sc >= 0.50),
+            "risk_score": sc,
+            "risk_tier": ("high" if sc >= 0.66 else ("medium" if sc >= 0.33 else "low")),
+            "danger_streak": st.session_state.get("danger_streak", 0),
+            "latency_ms": latency_ms,
+            "decisions_count": sum(1 for m in hist if m.get("role") == "user"),
         })
 
-    # stream story text
-    beat=get_current_beat(st.session_state) if st.session_state.get("story_mode") else None
-    st.session_state["t_scene_start"]=time.time()
-    gen=stream_scene(st.session_state["history"], LORE, beat=beat)
+    # --- Stream next scene text ---
+    beat = get_current_beat(st.session_state) if st.session_state.get("story_mode") else None
+    st.session_state["t_scene_start"] = time.time()
+    gen = stream_scene(st.session_state["history"], LORE, beat=beat)
 
-    buf=[]
+    buf = []
     for chunk in gen:
         buf.append(chunk)
-        text_so_far="".join(buf)
+        text_so_far = "".join(buf)
         caret = '<span class="caret">▋</span>' if anim_enabled else ''
         story_slot.markdown(
             f'<div class="story-window"><div class="storybox">{text_so_far}{caret}</div></div>',
             unsafe_allow_html=True,
         )
 
-    full="".join(buf)
+    full = "".join(buf)
 
     # finalize scene
-    stripped=full.rstrip()
+    stripped = full.rstrip()
     if stripped.endswith("[DEATH]"):
-        full=stripped[:-len("[DEATH]")].rstrip()
-        st.session_state["is_dead"]=True
+        full = stripped[:-len("[DEATH]")].rstrip()
+        st.session_state["is_dead"] = True
 
-    st.session_state["scene"]=full
-    st.session_state["history"].append({"role":"assistant","content":full})
+    st.session_state["scene"] = full
+    st.session_state["history"].append({"role": "assistant", "content": full})
     scene_index = st.session_state.get("scene_count", 0) + 1
+
+    # --- Terminal: DEATH (works regardless of story_mode) ---
+    if st.session_state.get("is_dead", False):
+        # No further choices on a terminal page
+        st.session_state["choices"] = []
+
+        # Telemetry + snapshot (keep robust fallbacks)
+        try:
+            save_event(pid, "death", {
+                "picked": picked,
+                "decisions_count": sum(1 for m in st.session_state.get("history", []) if m.get("role") == "user"),
+                "danger_streak": st.session_state.get("danger_streak", 0),
+            })
+        except Exception:
+            pass
+
+        try:
+            save_snapshot(
+                pid,
+                scene=full,
+                choices=[],
+                history=st.session_state.get("history", []),
+                username=st.session_state.get("player_name"),
+                gender=st.session_state.get("player_gender"),
+                archetype=st.session_state.get("player_archetype"),
+                last_illustration_url=st.session_state.get("display_illustration_url"),
+            )
+        except TypeError:
+            # legacy signature fallback
+            save_snapshot(
+                pid,
+                full,
+                [],
+                st.session_state.get("history", []),
+                st.session_state.get("player_name"),
+            )
+
+        # Prepare the recap block (rendered on next pass under the illustration)
+        recap = _build_story_summary(st.session_state.get("history", [])) if "_build_story_summary" in globals() else "Your adventure ends in tragedy."
+        st.session_state["__recap_html"] = f"""
+            <div class="story-summary" style="margin-top:.6rem;padding:.9rem 1.1rem;border:1px solid rgba(49,51,63,.18);
+                border-radius:8px;background:var(--secondary-background-color);line-height:1.6">
+            <h4 style="margin:.1rem 0 .55rem 0;">You Died.</h4>
+            <p style="margin:0 0 .65rem 0;">{recap}</p>
+            <p style="margin:0;opacity:.8">
+                Use the <b>sidebar</b> to <i>Start a New Story</i> or <i>Reset</i> the session.
+            </p>
+            </div>
+        """
+        # IMPORTANT: do NOT call render_death_options here; the recap handles terminal UX.
+        return
 
     # separator under the text
     _render_separator(sep_slot)
 
-    # decide whether this scene requests a NEW illustration; do NOT clear current display
     should_illustrate = ((scene_index - ILLUSTRATION_PHASE) % ILLUSTRATION_EVERY_N == 0)
     if should_illustrate and st.session_state.get("auto_illustrate", True):
-        seed = _has_first_sentence(full) or " ".join(full.split()[:18]) + "…"
-        if seed.strip():
+        # Freeze seed once for this scene and start exactly one job
+        seed = _freeze_seed_for_scene(scene_index, full)
+        if seed:
             _start_illustration_job(
-                seed,
-                bool(st.session_state.get("simple_cyoa", True)),
-                scene_index=scene_index,   # <- new
+                seed_sentence=seed,
+                simple=bool(st.session_state.get("simple_cyoa", True)),
+                scene_index=scene_index,  # <-- binds job to this scene
             )
 
     # choices: compute/store only; render happens once later in main()
     choices = generate_choices(st.session_state["history"], full, LORE)
     st.session_state["choices"] = choices
-    # do NOT render here; main() will render once and set t_choices_visible_at
+
+    # --- NEW: Precompute contextual risk for the *new* choices on this scene ---
+    riskmap = {}
+    for label in choices or []:
+        sc, why = _context_risk_score(label, full)
+        tier = "high" if sc >= 0.66 else ("medium" if sc >= 0.33 else "low")
+        riskmap[label] = {"score": sc, "tier": tier, "reason": why}
+    st.session_state["choice_risk_map"] = riskmap
 
     if st.session_state.get("story_mode", True):
         # 1) count this scene toward the current beat
         st.session_state["_beat_scene_count"] = st.session_state.get("_beat_scene_count", 0) + 1
-        current_beat = get_current_beat(st.session_state)   # e.g., "exposition"
+        current_beat = get_current_beat(st.session_state)
         target = int(BEAT_TARGET_SCENES.get(current_beat, 1))
 
-        # (optional dev log)
         _log_beat(
             "scene_in_beat",
             beat=current_beat,
             scenes_in_current_beat=st.session_state["_beat_scene_count"],
-            scene_count=st.session_state.get("scene_count", 0),  # the scene you just rendered
+            scene_count=st.session_state.get("scene_count", 0),
         )
 
         # 2) advance when we've met/exceeded the target for this beat
         if st.session_state["_beat_scene_count"] >= target:
             if current_beat == "resolution":
-                # arc ends
                 mark_story_complete()
                 _log_beat("story_complete", final_beat=current_beat)
             else:
-                # move to next beat and reset the per-beat counter
                 st.session_state["beat_index"] = min(
                     st.session_state.get("beat_index", 0) + 1, len(BEATS) - 1
                 )
                 st.session_state["_beat_scene_count"] = 0
                 _log_beat("advance_beat", from_beat=current_beat, to_beat=get_current_beat(st.session_state))
 
-        # === End conditions ===
-        if st.session_state.get("is_dead", False):
-            # Terminal: show the death panel only
-            st.session_state["choices"] = []
-            render_death_options(pid, grid_slot)
-            return
-
         if is_story_complete(st.session_state):
             # Terminal: no buttons; stash recap HTML for the next render pass
             st.session_state["choices"] = []
-
             recap = _build_story_summary(st.session_state.get("history", [])) if "_build_story_summary" in globals() else "Your adventure concludes."
             st.session_state["__recap_html"] = f"""
                 <div class="story-summary" style="margin-top:.6rem;padding:.9rem 1.1rem;border:1px solid rgba(49,51,63,.18);
                     border-radius:8px;background:var(--secondary-background-color);line-height:1.6">
-                <h4 style="margin:.1rem 0 .55rem 0;">Story Concludes:</h4>
-                <p style="margin:0 0 .65rem 0;">{recap}</p>
-                <p style="margin:0;opacity:.8">Use the <b>sidebar</b> to <i>Start a New Story</i> or <i>Reset</i> the session.</p>
+                  <h4 style="margin:.1rem 0 .55rem 0;">Story Concludes:</h4>
+                  <p style="margin:0 0 .65rem 0;">{recap}</p>
+                  <p style="margin:0;opacity:.8">Use the <b>sidebar</b> to <i>Start a New Story</i> or <i>Reset</i> the session.</p>
                 </div>
             """
             return
 
-
     last_img = st.session_state.get("last_illustration_url")
 
-    # Try kwargs first (newer store signatures), then positional (older).
+    # snapshot
     try:
         save_snapshot(
             pid,
@@ -757,17 +977,15 @@ def _advance_turn(pid: str, story_slot, sep_slot, illus_slot, grid_slot, anim_en
             username=st.session_state.get("player_name"),
             gender=st.session_state.get("player_gender"),
             archetype=st.session_state.get("player_archetype"),
-            last_illustration_url=last_img,              # <-- NEW
+            last_illustration_url=last_img,
         )
     except TypeError:
-        # older store.py without the new param – fall back silently
         save_snapshot(pid, full, choices, st.session_state["history"],
-                    username=st.session_state.get("player_name"))
-
+                      username=st.session_state.get("player_name"))
 
     st.session_state["scene_count"] = scene_index
 
-    # NEW: queue illustration for the *next* scene if that next scene will show art
+    # queue illustration for the *next* scene if that next scene will show art
     simple_flag = bool(st.session_state.get("simple_cyoa", True))
     if st.session_state.get("auto_illustrate", True):
         next_index = scene_index + 1
@@ -777,11 +995,12 @@ def _advance_turn(pid: str, story_slot, sep_slot, illus_slot, grid_slot, anim_en
                 _start_illustration_job(
                     seed_sentence=seed,
                     simple=simple_flag,
-                    scene_index=next_index,  # ← bake for the next scene
+                    scene_index=next_index,
                 )
 
     # finally bump the counter for this scene
     st.session_state["scene_count"] = scene_index
+
 
 # =============================================================================
 # Onboarding
@@ -795,10 +1014,24 @@ def onboarding(pid: str):
 
         name = st.text_input("Name", value=st.session_state.get("player_name") or "", max_chars=24)
         gender = st.selectbox("Gender", ["Unspecified", "Female", "Male", "Nonbinary"], index=0)
-        archetype = st.selectbox("Character type", ["Default"], index=0)
+        archetype = st.selectbox(
+            "Character type",
+            ["Default"],
+            index=0,
+            disabled=True,
+            help="Archetypes are coming soon."
+        )
+        st.caption("🔒 Archetypes are coming soon.")
 
-        mode_default_index = 0 if st.session_state.get("story_mode", True) else 1
-        mode = st.radio("Mode", options=["Story Mode", "Exploration"], index=mode_default_index)
+        # Force display to Story Mode (disabled) so users see it but can't switch yet
+        mode = st.radio(
+            "Mode",
+            options=["Story Mode", "Exploration (coming soon)"],
+            index=0,                 # show Story Mode selected
+            disabled=True,
+            help="Exploration mode is coming soon. Story Mode is active for now."
+        )
+        st.caption("🔒 Exploration mode is coming soon. Story Mode is active.")
 
         c1, c2 = st.columns(2)
         begin = c1.button("Begin Adventure", use_container_width=True, disabled=not name.strip(), key="onboard_begin")
@@ -810,12 +1043,16 @@ def onboarding(pid: str):
             st.session_state["player_name"]=name.strip()
             st.session_state["player_gender"]=gender
             st.session_state["player_archetype"]=archetype
-            st.session_state["story_mode"]=(mode=="Story Mode")
+            st.session_state["story_mode"] 
             st.session_state["beat_index"]=0; st.session_state["story_complete"]=False
             st.session_state["pending_choice"]="__start__"
             st.session_state["is_generating"]=True
             st.session_state["onboard_dismissed"]=True
             st.session_state["scene_count"]=0
+
+            st.session_state.pop("is_dead", None)
+            st.session_state.pop("__recap_html", None)
+
             _soft_rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -950,6 +1187,11 @@ def main():
             st.caption(
                 f"PID: `{pid}` • has_snapshot: {int(_has)} • "
                 f"scene_len: {len(scene_text)} • history: {len(history)} • choices: {len(choices)}"
+            )
+            st.caption(
+                f"danger_streak: {st.session_state.get('danger_streak', 0)} • "
+                f"last_pick_risky: {int(bool(st.session_state.get('last_pick_risky', False)))} • "
+                f"last_pick: {st.session_state.get('last_pick_label','—')}"
             )
             st.caption(
                 f"pending_choice: {st.session_state.get('pending_choice')} • "
@@ -1123,6 +1365,11 @@ def main():
         st.session_state["is_generating"]=True
         st.session_state["onboard_dismissed"]=True
         st.session_state["scene_count"]=0
+
+        # ADD: clear terminal flags
+        st.session_state.pop("is_dead", None)
+        st.session_state.pop("__recap_html", None)
+
         _soft_rerun()
 
     elif action == "reset":
@@ -1204,9 +1451,18 @@ def main():
         except Exception:
             pass
 
-    # Then render illustration into its placeholder; helper will schedule a rerun if needed.
+    # Then render illustration into its placeholder.
     current_ix = st.session_state.get("scene_count", 0)
     render_persistent_illustration(illus_ph, current_ix)
+
+    # --- Terminal recap gate (death or resolution): replace any buttons with recap and stop ---
+    recap_html = st.session_state.get("__recap_html")
+    if recap_html:
+        choices_ph.markdown(recap_html, unsafe_allow_html=True)
+        st.session_state["t_choices_visible_at"] = None
+        return
+
+    # Only schedule soft refreshes if not terminal
     _gentle_autorefresh_any_running()
 
     
