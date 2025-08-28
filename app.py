@@ -281,44 +281,38 @@ def _scene_key(text: str, simple: bool) -> str:
     return f"ill-{h}"
 
 def _start_illustration_job(seed_sentence: str, simple: bool, scene_index: Optional[int] = None) -> str:
-    # If called with a scene_index, block duplicates for that scene.
-    if scene_index is not None:
-        by_scene = st.session_state.setdefault("ill_job_by_scene", {})
-        if scene_index in by_scene:
-            return by_scene[scene_index]["key"]
-
-    key  = _scene_key(seed_sentence, simple)
+    """Kick off an illustration job and (optionally) bind it to a scene index."""
+    key = _scene_key(seed_sentence, simple)
     jobs = st.session_state.setdefault("ill_jobs", {})
+    if key not in jobs:
+        fut = _ill_executor().submit(generate_illustration, seed_sentence, simple)
+        jobs[key] = {
+            "future": fut,
+            "result": None,
+            "seed": seed_sentence,
+            "simple": bool(simple),
+            "scene_index": scene_index,
+            "started_at": time.time(),
+        }
+        st.session_state["ill_jobs"] = jobs
 
-    if key in jobs:
-        # already queued by seed; bind to scene if provided
-        if scene_index is not None:
-            st.session_state.setdefault("ill_job_by_scene", {})[scene_index] = {"key": key}
-            jobs[key]["scene_index"] = scene_index            # <-- add this
-        st.session_state["ill_last_key"] = key
-        return key
-
-    fut = _ill_executor().submit(generate_illustration, seed_sentence, simple)
-    jobs[key] = {
-        "future": fut,
-        "result": None,
-        "scene_index": scene_index,                           # <-- add this
-    }
-    st.session_state["ill_jobs"] = jobs
     st.session_state["ill_last_key"] = key
 
     if scene_index is not None:
-        st.session_state.setdefault("ill_job_by_scene", {})[scene_index] = {"key": key}
+        by_scene = st.session_state.setdefault("ill_job_by_scene", {})
+        by_scene[str(scene_index)] = {"key": key}
+        st.session_state["ill_job_by_scene"] = by_scene
 
     return key
 
 def _job_for_scene(scene_text: str, simple: bool):
     """Return (key, job_dict|None) for the *current* scene, preferring the frozen seed."""
     jobs = st.session_state.get("ill_jobs", {})
-    scene_index = int(st.session_state.get("scene_count", 0))  # current scene index already rendered
+    scene_index = int(st.session_state.get("scene_count", 0))
 
-    # Prefer a scene-frozen seed
-    seed = st.session_state.get("ill_seed_by_scene", {}).get(scene_index)
+    # Prefer a scene-frozen seed (keys are stored as strings)
+    seed_map = st.session_state.get("ill_seed_by_scene", {}) or {}
+    seed = seed_map.get(str(scene_index))
     if seed:
         key = _scene_key(seed, simple)
         return key, jobs.get(key)
@@ -327,21 +321,6 @@ def _job_for_scene(scene_text: str, simple: bool):
     seed = _has_first_sentence(scene_text) or (scene_text or "").strip()
     key  = _scene_key(seed, simple)
     return key, jobs.get(key)
-
-
-def _prune_old_jobs(keep_last_n: int = 8) -> None:
-    jobs = st.session_state.get("ill_jobs", {})
-    if len(jobs) <= keep_last_n:
-        return
-    items = []
-    for k, j in jobs.items():
-        si = int(j.get("scene_index") or -1)
-        ca = float(j.get("completed_at") or 0)
-        items.append((si, ca, k))
-    items.sort(reverse=True)  # newest scenes first, then most recent completion
-    for _, _, k in items[keep_last_n:]:
-        jobs.pop(k, None)
-    st.session_state["ill_jobs"] = jobs
 
 def _opening_seed() -> str:
     if isinstance(LORE, dict):
@@ -407,54 +386,207 @@ def _harvest_for_scene(target_scene_index: int):
         return img_ref, dbg
     return None, None
 
-def render_persistent_illustration(illus_ph, current_scene_index: int):
+def render_persistent_illustration(illus_ph, scene_index: int, initial_wait_ms: int = 600):
     """
-    Keep the last image until this scene's art is finished; never show loading UI.
+    Show (or keep) the current illustration; if the job for this scene finishes within
+    initial_wait_ms, harvest and swap in-place (no st.rerun()).
     """
-    current_url = st.session_state.get("display_illustration_url")
-    target_url, dbg = _harvest_for_scene(current_scene_index)
+    url = st.session_state.get("display_illustration_url")
 
-    # swap only if we got the image for THIS scene
-    if target_url and target_url != current_url:
-        st.session_state["display_illustration_url"] = target_url
-        st.session_state["last_illustration_debug"] = dbg
-        current_url = target_url
+    # Resolve scene text (prefer frozen seed -> fallback to current scene)
+    simple_flag = bool(st.session_state.get("simple_cyoa", True))
+    seed_map = st.session_state.get("ill_seed_by_scene", {}) or {}
+    scene_text = seed_map.get(str(scene_index)) or st.session_state.get("scene", "")
 
-        # NEW: persist for snapshots + rehydrate after refresh
-        st.session_state["last_illustration_url"] = current_url
-        # NEW: cache by scene keys so a refresh can instantly restore
-        try:
-            store = _illustration_store()
-            simple_flag = bool(st.session_state.get("simple_cyoa", True))
-            for k in _scene_keys_for(st.session_state.get("scene", ""), simple_flag):
-                store[k] = current_url
-        except Exception:
-            pass
+    # Locate job by scene index
+    by_scene = st.session_state.get("ill_job_by_scene", {}) or {}
+    ref = by_scene.get(str(scene_index))
+    job = st.session_state.get("ill_jobs", {}).get(ref["key"]) if ref else None
 
-    if current_url:
-        illus_ph.markdown(
-            f'<div class="illus-inline"><img src="{current_url}" alt="illustration"/></div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        illus_ph.empty()  # no placeholder
+    def _draw(status="Illustration brewing…"):
+        if url:
+            illus_ph.markdown(
+                f'<div class="illus-inline"><img src="{url}" alt="illustration"/></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            illus_ph.markdown(
+                f'<div class="illus-inline illus-skeleton"><div class="illus-status">{status}</div></div>',
+                unsafe_allow_html=True,
+            )
 
-def _gentle_autorefresh_any_running(delay: float = 0.7, max_polls: int = 40) -> None:
-    """Poll while there are any running illustration jobs (global), bounded."""
-    jobs = st.session_state.get("ill_jobs", {})
-    if not any((j.get("future") and not j["future"].done() and j.get("result") is None) for j in jobs.values()):
+    if not job:
+        _draw()
         return
+
+    fut = job.get("future")
+
+    # If already done, harvest once
+    if fut and fut.done():
+        if job.get("result") is None:
+            try:
+                job["result"] = fut.result(timeout=0)
+            except Exception as e:
+                job["result"] = (None, {"error": repr(e)})
+        res = job.get("result")
+        if res:
+            img_ref, dbg = res if (isinstance(res, tuple) and len(res) == 2) else (res, {})
+            if img_ref:
+                # show + persist
+                st.session_state["display_illustration_url"] = img_ref
+                st.session_state["last_illustration_url"] = img_ref
+                st.session_state["last_illustration_debug"] = dbg
+                try:
+                    store = _illustration_store()
+                    for k in _scene_keys_for(scene_text, simple_flag):
+                        store[k] = img_ref
+                except Exception:
+                    pass
+                url = img_ref
+        _draw()
+        return
+
+    # Not done → draw current (or skeleton), then micro-poll (no global rerun)
+    _draw()
+    if initial_wait_ms and fut:
+        deadline = time.time() + (initial_wait_ms / 1000.0)
+        while time.time() < deadline:
+            if fut.done():
+                if job.get("result") is None:
+                    try:
+                        job["result"] = fut.result(timeout=0)
+                    except Exception as e:
+                        job["result"] = (None, {"error": repr(e)})
+                res = job.get("result")
+                if res:
+                    img_ref, dbg = res if (isinstance(res, tuple) and len(res) == 2) else (res, {})
+                    if img_ref:
+                        st.session_state["display_illustration_url"] = img_ref
+                        st.session_state["last_illustration_url"] = img_ref
+                        st.session_state["last_illustration_debug"] = dbg
+                        try:
+                            store = _illustration_store()
+                            for k in _scene_keys_for(scene_text, simple_flag):
+                                store[k] = img_ref
+                        except Exception:
+                            pass
+                        url = img_ref
+                break
+            time.sleep(0.05)
+        _draw()
+
+# =============================================================================
+# Misc helpers
+# =============================================================================
+
+def _gentle_autorefresh_for_scene(scene_index: int, delay: float = 1.0, max_polls: int = 20) -> None:
+    """
+    If the illustration job for this scene is still pending and nothing is displayed yet,
+    schedule a very light rerun loop (scene-scoped, capped) to swap the image when ready.
+    """
+    # Already have something to show? Don't rerun.
+    if st.session_state.get("display_illustration_url"):
+        return
+
+    # Find the job bound to this scene
+    by_scene = st.session_state.get("ill_job_by_scene", {}) or {}
+    ref = by_scene.get(str(scene_index))
+    job = st.session_state.get("ill_jobs", {}).get(ref["key"]) if ref else None
+    fut = job.get("future") if job else None
+    if not fut or fut.done():
+        return
+
+    # Throttle per scene
     polls = st.session_state.setdefault("ill_polls", {})
-    c = int(polls.get("__ANY__", 0))
+    k = f"scn_{scene_index}"
+    c = int(polls.get(k, 0))
     if c >= max_polls:
         return
-    polls["__ANY__"] = c + 1
+
+    polls[k] = c + 1
     st.session_state["ill_polls"] = polls
+
     time.sleep(delay)
     _soft_rerun()
 
+
+def _gentle_autorefresh_any_running(delay: float = 0.0, max_polls: int = 0) -> None:
+    """Disabled to prevent full-page flicker during illustration jobs."""
+    return
+
+import re
+
+def _to_past_tense(text: str) -> str:
+    """Lightweight present→past converter for recap text (keeps 2p POV)."""
+    # Phrase-level tweaks first
+    swaps_phrase = [
+        (r"\byou are\b", "you were"),
+        (r"\byou're\b", "you were"),
+        (r"\bthere is\b", "there was"),
+        (r"\bthere are\b", "there were"),
+        (r"\byou have\b", "you had"),
+        (r"\byou do\b", "you did"),
+        (r"\byou don't\b", "you didn't"),
+        (r"\byou can\b", "you could"),
+        (r"\byou cannot\b", "you could not"),
+        (r"\byou can't\b", "you couldn't"),
+    ]
+    s = text
+    for pat, repl in swaps_phrase:
+        s = re.sub(pat, repl, s, flags=re.IGNORECASE)
+
+    # Common verb lemmas → past (irregulars + frequent regulars)
+    irregular = {
+        "am":"was","is":"was","are":"were","be":"was",
+        "go":"went","come":"came","see":"saw","find":"found","feel":"felt",
+        "take":"took","run":"ran","say":"said","tell":"told","lead":"led",
+        "begin":"began","become":"became","fall":"fell","fight":"fought",
+        "hold":"held","keep":"kept","leave":"left","make":"made","meet":"met",
+        "hear":"heard","stand":"stood","choose":"chose",
+    }
+    regular = {
+        # very common actions in your scenes
+        "move":"moved","step":"stepped","walk":"walked","turn":"turned",
+        "enter":"entered","cross":"crossed","open":"opened","close":"closed",
+        "touch":"touched","look":"looked","reach":"reached","approach":"approached",
+        "press":"pressed","search":"searched","whisper":"whispered","watch":"watched",
+        "draw":"drew",  # treat as irregular above if you prefer "drew"
+        "start":"started","continue":"continued","face":"faced","confront":"confronted",
+    }
+    # Prefer irregular over regular when both exist
+    verb_map = {**regular, **irregular, **irregular}
+
+    def _inflect(match: re.Match) -> str:
+        w = match.group(0)
+        lw = w.lower()
+        new = verb_map.get(lw)
+        if not new:
+            # crude -s → -ed for 3rd person forms that slip in
+            if lw.endswith("es"):
+                new = lw[:-2] + "ed"
+            elif lw.endswith("s"):
+                new = lw[:-1] + "ed"
+        if not new:
+            # simple present → past: walk -> walked (very rough)
+            if re.fullmatch(r"[a-z]+", lw):
+                if lw.endswith("e"):
+                    new = lw + "d"
+                else:
+                    new = lw + "ed"
+        # Preserve capitalization
+        if w.istitle():
+            new = new[:1].upper() + new[1:]
+        elif w.isupper():
+            new = new.upper()
+        return new or w
+
+    # Only convert targeted verbs; avoid blasting every token
+    verb_pattern = r"\b(" + "|".join(sorted({*irregular.keys(), *regular.keys()}, key=len, reverse=True)) + r")\b"
+    s = re.sub(verb_pattern, _inflect, s, flags=re.IGNORECASE)
+    return s
+
 def _build_story_summary(history) -> str:
-    """Lightweight recap from existing assistant scenes; no LLM needed."""
+    """Recap from existing assistant scenes; returns **past-tense** summary."""
     try:
         scenes = [m.get("content","") for m in history if m.get("role") == "assistant"]
         if not scenes:
@@ -462,15 +594,74 @@ def _build_story_summary(history) -> str:
         import re
         full = " ".join(scenes).strip()
         sents = re.split(r'(?<=[.!?])\s+', full)
+
         if len(sents) <= 4:
-            return full
-        # first 2 + last 2 sentences with an ellipsis
-        return " ".join(sents[:2] + ["…"] + sents[-2:])
+            recap = full
+        else:
+            recap = " ".join(sents[:2] + ["…"] + sents[-2:])
+
+        recap_past = _to_past_tense(recap)
+        # Ensure it reads like a wrap-up line
+        if not recap_past.endswith((".", "!", "?")):
+            recap_past += "."
+        return recap_past
     except Exception:
         return "Your adventure concludes."
 
 def _soft_rerun():
     (getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None))()
+
+# --- Safety: always ensure a non-risky option exists ---
+def _ensure_non_risky_choice(choices: List[str], scene_text: str) -> List[str]:
+    """
+    Post-processes the generated choices to guarantee at least one low-risk option.
+    If none exist, it replaces the riskiest entry with a safe alternative.
+    Keeps list length the same (uses CHOICE_COUNT).
+    """
+    if not choices:
+        choices = []
+
+    # Risk scoring: prefer contextual, fall back to keyword check
+    has_ctx = "_context_risk_score" in globals()
+    scored = []
+    for label in choices:
+        if has_ctx:
+            score, why = _context_risk_score(label, scene_text)
+        else:
+            score, why = (1.0 if is_risky_label(label) else 0.0, "keyword_fallback")
+        scored.append((label, score, why))
+
+    # Already has a safe option?
+    if any(s <= 0.33 for _, s, _ in scored):
+        return choices
+
+    # Build a safe alternative (context-lite, unique text)
+    safe_templates = [
+        "Hold back and observe carefully",
+        "Take a cautious route and avoid conflict",
+        "Withdraw to a safer position",
+        "Speak calmly and de-escalate",
+        "Wait and gather information"
+    ]
+    # Avoid duplicates
+    existing = set(choices)
+    safe_label = next((t for t in safe_templates if t not in existing), "Step away and reassess")
+
+    # Replace the *riskiest* choice with the safe one
+    if scored:
+        riskiest_idx = max(range(len(scored)), key=lambda i: scored[i][1])
+        choices = list(choices)
+        choices[riskiest_idx] = safe_label
+    else:
+        # If the model returned nothing, seed two defaults
+        choices = [safe_label, "Probe the area from a distance"]
+
+    # Update dev map so the UI shows it as safe
+    riskmap = st.session_state.setdefault("choice_risk_map", {})
+    riskmap[safe_label] = {"score": 0.0, "tier": "low", "reason": "forced_safe"}
+    st.session_state["choice_risk_map"] = riskmap
+    st.session_state["forced_safe_choice"] = safe_label  # for debugging
+    return choices
 
 # =============================================================================
 # Lore / constants
@@ -660,6 +851,89 @@ def render_end_options(pid: str, slot) -> None:
 # =============================================================================
 # Render helpers: separator + inline illustration
 # =============================================================================
+
+def render_persistent_illustration(illus_ph, scene_text_or_ix, initial_wait_ms: int = 600):
+    """
+    Draw (or keep) the current illustration without full-page reruns.
+    If the job tied to this scene finishes within initial_wait_ms, harvest and swap.
+    """
+    # Resolve scene text for job-lookup
+    if isinstance(scene_text_or_ix, int):
+        # prefer your per-scene seed map, fallback to the current scene text
+        seed_map = st.session_state.get("ill_seed_by_scene", {})
+        scene_text = seed_map.get(str(scene_text_or_ix), "") or st.session_state.get("scene", "")
+    else:
+        scene_text = (scene_text_or_ix or st.session_state.get("scene", ""))
+
+    simple_flag = bool(st.session_state.get("simple_cyoa", True))
+    url = st.session_state.get("display_illustration_url")
+
+    # Find job for this scene (by text) + fallback to last key if you track by index only
+    key, job = _job_for_scene(scene_text, simple_flag)
+    if not job:
+        # fallback: if you track jobs by scene index only
+        last_key = st.session_state.get("ill_last_key")
+        job = st.session_state.get("ill_jobs", {}).get(last_key) if last_key else None
+
+    def _render(status="Illustration brewing…"):
+        if url:
+            illus_ph.markdown(
+                f'<div class="illus-inline"><img src="{url}" alt="illustration"/></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            illus_ph.markdown(
+                f'<div class="illus-inline illus-skeleton"><div class="illus-status">{status}</div></div>',
+                unsafe_allow_html=True,
+            )
+
+    # No job known → just render current (or skeleton if none yet)
+    if not job:
+        _render()
+        return
+
+    fut = job.get("future")
+
+    # If already done, harvest once and render
+    if fut and fut.done():
+        if job.get("result") is None:
+            try:
+                job["result"] = fut.result(timeout=0)
+            except Exception as e:
+                job["result"] = (None, {"error": repr(e)})
+        res = job.get("result")
+        if res:
+            img_ref, dbg = res if (isinstance(res, tuple) and len(res) == 2) else (res, {})
+            if img_ref:
+                st.session_state["display_illustration_url"] = img_ref
+                st.session_state["last_illustration_debug"] = dbg
+                url = img_ref
+        _render()
+        return
+
+    # Not done → draw once, then micro-poll (no rerun)
+    _render()
+    if initial_wait_ms and fut:
+        deadline = time.time() + (initial_wait_ms / 1000.0)
+        while time.time() < deadline:
+            if fut.done():
+                if job.get("result") is None:
+                    try:
+                        job["result"] = fut.result(timeout=0)
+                    except Exception as e:
+                        job["result"] = (None, {"error": repr(e)})
+                res = job.get("result")
+                if res:
+                    img_ref, dbg = res if (isinstance(res, tuple) and len(res) == 2) else (res, {})
+                    if img_ref:
+                        st.session_state["display_illustration_url"] = img_ref
+                        st.session_state["last_illustration_debug"] = dbg
+                        url = img_ref
+                break
+            time.sleep(0.05)
+        _render()
+
+
 def _render_separator(ph):
     ph.markdown(
         """
@@ -721,13 +995,17 @@ def ensure_keys():
     st.session_state.setdefault("ill_seed_by_scene", {})  # {scene_index: seed}
     st.session_state.setdefault("ill_job_by_scene", {})   # {scene_index: {"key": str}}
 
-def _freeze_seed_for_scene(scene_index: int, text: str) -> str:
+def _freeze_seed_for_scene(scene_index: int, scene_text: str) -> Optional[str]:
+    """Store a single, stable seed for this scene index and return it."""
     seeds = st.session_state.setdefault("ill_seed_by_scene", {})
-    if scene_index in seeds:
-        return seeds[scene_index]
-    seed = _has_first_sentence(text) or " ".join((text or "").split()[:18]) + "…"
+    k = str(scene_index)
+    if k in seeds:
+        return seeds[k]
+    seed = _has_first_sentence(scene_text) or " ".join((scene_text or "").split()[:18]) + "…"
     seed = (seed or "").strip()
-    seeds[scene_index] = seed
+    if not seed:
+        return None
+    seeds[k] = seed
     st.session_state["ill_seed_by_scene"] = seeds
     return seed
 
@@ -915,8 +1193,25 @@ def _advance_turn(pid: str, story_slot, sep_slot, illus_slot, grid_slot, anim_en
             )
 
     # choices: compute/store only; render happens once later in main()
-    choices = generate_choices(st.session_state["history"], full, LORE)
-    st.session_state["choices"] = choices
+    choices = generate_choices(st.session_state["history"], full, LORE) or []
+    
+    # Compute contextual risk map (keeps your current UI diagnostics)
+    riskmap = {}
+
+    for label in choices:
+        if "_context_risk_score" in globals():
+            sc, why = _context_risk_score(label, full)
+        else:
+            sc, why = (1.0 if is_risky_label(label) else 0.0, "keyword_fallback")
+        tier = "high" if sc >= 0.66 else ("medium" if sc >= 0.33 else "low")
+        riskmap[label] = {"score": sc, "tier": tier, "reason": why}
+    st.session_state["choice_risk_map"] = riskmap
+
+    # 🔒 Guarantee at least one low-risk option
+    choices = _ensure_non_risky_choice(choices, full)
+
+    # Persist back (keeps CHOICE_COUNT semantics in your renderer)
+    st.session_state["choices"] = choices[:CHOICE_COUNT]
 
     # --- NEW: Precompute contextual risk for the *new* choices on this scene ---
     riskmap = {}
@@ -1021,7 +1316,7 @@ def onboarding(pid: str):
             disabled=True,
             help="Archetypes are coming soon."
         )
-        st.caption("🔒 Archetypes are coming soon.")
+        st.caption("🔒 Archetypes coming soon.")
 
         # Force display to Story Mode (disabled) so users see it but can't switch yet
         mode = st.radio(
@@ -1031,14 +1326,18 @@ def onboarding(pid: str):
             disabled=True,
             help="Exploration mode is coming soon. Story Mode is active for now."
         )
-        st.caption("🔒 Exploration mode is coming soon. Story Mode is active.")
+        st.caption("🔒 coming soon.")
 
         c1, c2 = st.columns(2)
-        begin = c1.button("Begin Adventure", use_container_width=True, disabled=not name.strip(), key="onboard_begin")
-        reset = c2.button("Reset Session", use_container_width=True, key="onboard_reset")
+        begin = c1.button(
+            "Begin Adventure",
+            use_container_width=True,
+            disabled=not name.strip(),
+            key="onboard_begin",
+        )
+        with c2:
+            st.empty()  # placeholder to keep the same width as before
 
-        if reset:
-            delete_snapshot(pid); reset_session(full_reset=True); _soft_rerun()
         if begin:
             st.session_state["player_name"]=name.strip()
             st.session_state["player_gender"]=gender
@@ -1452,8 +1751,11 @@ def main():
             pass
 
     # Then render illustration into its placeholder.
-    current_ix = st.session_state.get("scene_count", 0)
-    render_persistent_illustration(illus_ph, current_ix)
+    current_ix = st.session_state.get("scene_count", 1)  # default to 1 for the first scene
+    render_persistent_illustration(illus_ph, current_ix, initial_wait_ms=600)
+
+    # if still pending and nothing displayed yet, lightly poll this scene only
+    _gentle_autorefresh_for_scene(current_ix, delay=1.0, max_polls=20)
 
     # --- Terminal recap gate (death or resolution): replace any buttons with recap and stop ---
     recap_html = st.session_state.get("__recap_html")
@@ -1461,9 +1763,6 @@ def main():
         choices_ph.markdown(recap_html, unsafe_allow_html=True)
         st.session_state["t_choices_visible_at"] = None
         return
-
-    # Only schedule soft refreshes if not terminal
-    _gentle_autorefresh_any_running()
 
     
 if __name__ == "__main__":
