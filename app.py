@@ -1683,28 +1683,17 @@ def main():
         choices_ph.markdown(html, unsafe_allow_html=True)
         return
 
-
+    # --- Choices: clamp to story width via our own wrapper ---
     if not st.session_state.get("is_dead", False) and not is_story_complete(st.session_state):
         current_choices = list(st.session_state.get("choices", []))
-
-        # NEW: two placeholders, side-by-side in the DOM
-        choices_marker = st.empty()
-        choices_container = st.empty()
-
-        # Marker div (no content, just for CSS anchoring)
-        choices_marker.markdown('<div class="choices-wrap"></div>', unsafe_allow_html=True)
-
-        # Buttons go in the *next* sibling block
-        render_choices_grid(choices_container, choices=current_choices, generating=False, count=CHOICE_COUNT)
-
+        with choices_ph.container():
+            st.markdown('<div class="story-body">', unsafe_allow_html=True)  # width clamp
+            slot = st.container()                                           # child container INSIDE wrapper
+            render_choices_grid(slot, choices=current_choices, generating=False, count=CHOICE_COUNT)
+            st.markdown('</div>', unsafe_allow_html=True)
         st.session_state["t_choices_visible_at"] = time.time()
     else:
-        # Clear both if you want
-        try:
-            choices_marker.empty()
-            choices_container.empty()
-        except NameError:
-            pass
+        choices_ph.empty()
 
     if not st.session_state.get("display_illustration_url"):
         try:
