@@ -15,37 +15,19 @@ def inject_css(enabled: bool = True) -> None:
     # One consolidated <style> block
     st.markdown(
                 """
+
 <style>
+:root { --story-body-width: 680px; }
 
-/* ---- Theme tokens ---- */
-:root{
-  --ink:#2b2b2b;
-  --card:#ffffff;
-  --ring:#f59e0b;                 /* warm lantern */
-  --story-body-width: 80%;      /* single source of truth for content width */
-}
 
-/* ---- Scene card (optional) ---- */
-.scene-block{
-  color:var(--ink);
-  background:var(--card);
-  border:1px solid rgba(0,0,0,.08);
-  border-radius:12px;
-  padding:18px;
-  box-shadow:0 8px 18px rgba(0,0,0,.05);
-}
-
-/* ---- Story text ---- */
+/* Anchor width for the story content */
 .story-window .storybox{
   width: var(--story-body-width);
   max-width: none;
   margin: 0;
   padding: 1rem 1.25rem;
-  background:#fdf8f2;
-  color:#333;
   border:1px solid #e8e0d3;
   border-radius:4px;
-  box-shadow:0 1px 1px rgba(0,0,0,.05);
   font-family: "Times New Roman", serif;
   font-size: 1.5rem;
   line-height: 1.6;
@@ -53,8 +35,6 @@ def inject_css(enabled: bool = True) -> None:
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }
-.story-window .storybox p{ margin:0 0 .95rem 0; }
-.story-window .storybox p + p{ text-indent:1.25em; }
 
 /* ---- Separator (match story width) ---- */
 .illus-sep{
@@ -86,53 +66,27 @@ def inject_css(enabled: bool = True) -> None:
   border-radius: 4px;
 }
 
-/* ---- Clamp choices to story width ---- */
-.story-body,
-.story-body > div,
-.story-body > div > div{
+/* === Clamp the entire choices block to the same width ===
+   The marker (.story-body) sits inside an stMarkdown wrapper.
+   We clamp the *outer* Streamlit block that CONTAINS that marker. */
+div[data-testid="stVerticalBlock"]:has(.story-body){
   width: var(--story-body-width) !important;
   max-width: var(--story-body-width) !important;
   margin: 0 !important;
   padding: 0 !important;
 }
-.story-body .stButton > button{ width:100% !important; }
-.story-body [data-testid="column"]{ padding-left:6px !important; padding-right:6px !important; }
 
-/* ---- Button styling ---- */
-.stButton>button{
-  background:#f6f4e9;
-  color:#333;
-  border:1px solid #c8c8c8;
-  border-radius:8px;
-  padding:10px 16px;
-  font-family:"Times New Roman", serif;
+/* Make every button inside that clamped block fill the width */
+div[data-testid="stVerticalBlock"]:has(.story-body) .stButton > button{
+  width: 100% !important;
 }
-.stButton>button:hover{ background:#eee9d9; border-color:#b8b8b8; }
 
-/* ---- Lantern pulse ---- */
-.lantern{ display:inline-flex; align-items:center; gap:8px; color:#7a5a00; font-weight:600; }
-.lantern .bulb{
-  width:10px; height:10px; border-radius:50%;
-  background:#fcd34d;
-  box-shadow:0 0 8px #f59e0b, 0 0 16px rgba(245,158,11,.8);
-  animation:lanternPulse 1.1s ease-in-out infinite;
+/* Tighten the two-column gutter inside that clamped block */
+div[data-testid="stVerticalBlock"]:has(.story-body) [data-testid="column"]{
+  padding-left: 6px !important;
+  padding-right: 6px !important;
 }
-@keyframes lanternPulse{
-  0%,100%{ transform:scale(.95); box-shadow:0 0 6px #f59e0b, 0 0 12px rgba(245,158,11,.5) }
-  50%     { transform:scale(1.05); box-shadow:0 0 12px #f59e0b, 0 0 28px rgba(245,158,11,.9) }
-}
-@media (prefers-reduced-motion: reduce){ *{ animation:none !important; transition:none !important } }
 
-/* ---- (Optional) Mobile TikTok shell kept as-is below ---- */
-@media (max-width: 768px){
-  .desktop-shell { display:none !important; }
-  .mobile-shell  { display:block !important; }
-  /* ... your tt-card styles ... */
-}
-@media (min-width: 850px){
-  .desktop-shell { display:block !important; }
-  .mobile-shell  { display:none !important; }
-}
 </style>
 
                 """,

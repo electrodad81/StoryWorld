@@ -1685,12 +1685,12 @@ def main():
 
     # --- Choices: clamp to story width via our own wrapper ---
     if not st.session_state.get("is_dead", False) and not is_story_complete(st.session_state):
+        # Choices (inside your normal not-dead/not-complete gate)
         current_choices = list(st.session_state.get("choices", []))
         with choices_ph.container():
-            st.markdown('<div class="story-body">', unsafe_allow_html=True)  # width clamp
-            slot = st.container()                                           # child container INSIDE wrapper
+            st.markdown('<div class="story-body">', unsafe_allow_html=True)  # width marker
+            slot = st.container()                                                  # next sibling
             render_choices_grid(slot, choices=current_choices, generating=False, count=CHOICE_COUNT)
-            st.markdown('</div>', unsafe_allow_html=True)
         st.session_state["t_choices_visible_at"] = time.time()
     else:
         choices_ph.empty()
