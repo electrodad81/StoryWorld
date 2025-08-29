@@ -266,7 +266,7 @@ def _history_text(history: List[Dict[str, str]]) -> str:
 BEAT_GUIDELINES = {
     "exposition": (
         "Open in motion; establish POV, desire, and a concrete obstacle. "
-        "Plant an opening image to echo later. Avoid >2 sentences of backstory."
+        "Plant an opening image to echo later."
     ),
     "rising_action": (
         "Escalate with 1–2 concrete complications that corner the protagonist. "

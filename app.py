@@ -1032,10 +1032,10 @@ def reset_session(full_reset=False):
 # =============================================================================
 BEATS=["exposition","rising_action","climax","falling_action","resolution"]
 
-BEAT_TARGET_SCENES={"exposition":2,
-                    "rising_action":3,
+BEAT_TARGET_SCENES={"exposition":3,
+                    "rising_action":4,
                     "climax":2,
-                    "falling_action":2,
+                    "falling_action":3,
                     "resolution":1}
 
 def get_current_beat(state)->str:
@@ -1344,14 +1344,17 @@ def onboarding(pid: str):
             st.session_state["player_name"]=name.strip()
             st.session_state["player_gender"]=gender
             st.session_state["player_archetype"]=archetype
-            st.session_state["story_mode"] 
-            st.session_state["beat_index"]=0; st.session_state["story_complete"]=False
+            st.session_state["story_mode"]       = (mode == "Story Mode")
+            st.session_state["beat_index"]=0
+            st.session_state["story_complete"]=False
+
+            st.session_state["onboard_dismissed"]=True
             st.session_state["pending_choice"]="__start__"
             st.session_state["is_generating"]=True
-            st.session_state["onboard_dismissed"]=True
             st.session_state["scene_count"]=0
+            st.rerun() # one-time rerun so onboarding is gone on the first streaming pass
 
-            st.session_state["run_seed"] = uuid.uuid4().hex  # NEW: fresh seed on first start
+            #st.session_state["run_seed"] = uuid.uuid4().hex  # NEW: fresh seed on first start
 
             st.session_state.pop("is_dead", None)
             st.session_state.pop("__recap_html", None)
@@ -1376,74 +1379,6 @@ def main():
     # As soon as a scene exists, permanently hide onboarding
     if (st.session_state.get("scene") or st.session_state.get("history")):
         st.session_state["onboard_dismissed"] = True
-
-    # --- Book-like type; narrower main, added RIGHT margin via container max-width ---
-    st.markdown("""
-    <style>
-        [data-testid="stAppViewContainer"] > .main .block-container{
-          max-width: 1040px !important;
-          padding-left: .35rem !important;
-          padding-right: 10rem !important;
-          margin-left: auto; margin-right: auto;
-        }
-        :root{
-          --story-max: 680px;
-          --choices-h: 120px;
-        }
-        [data-testid="stVerticalBlock"] > div:has(> div.story-window){
-          width: 100% !important;
-          max-width: var(--story-max) !important;
-          margin-left: 0 !important;
-          margin-right: auto !important;
-        }
-        .story-window{ width:100%; margin: .2rem 0 .25rem 0; }
-        .storybox{
-          font-family: "Georgia","Garamond","Times New Roman",serif;
-          font-size: 1.5rem; line-height: 1.75; letter-spacing: .005em;
-          text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased;
-        }
-        .storybox p{ margin: 0 0 .95rem 0; }
-        .storybox p + p{ text-indent: 1.25em; }
-
-        .illus-sep{ display:flex; align-items:center; gap:.5rem; margin:.12rem 0 .32rem 0; }
-        .illus-sep .line{ flex:1; height:1px; background:linear-gradient(90deg,rgba(0,0,0,0),rgba(0,0,0,.28),rgba(0,0,0,0)); }
-        .illus-sep .gem{ font-size:.8rem; opacity:.6; line-height:1; }
-
-        .illus-inline{
-          width: auto;
-          max-width: calc(100% - 10rem);
-          margin: .6rem 1rem 1.4rem 1rem;
-          background: var(--secondary-background-color);
-          border: 1px solid rgba(49,51,63,.18);
-          border-radius: 6px;
-          padding: .55rem;
-          box-shadow: 0 1px 2px rgba(0,0,0,.05);
-          display:flex; align-items:center; justify-content:center;
-        }
-        .illus-inline img{ width:100%; height:auto; border-radius:8px; display:block; object-fit:contain; }
-        .illus-inline .illus-status{ font-size:.95rem; opacity:.75; }
-        .illus-skeleton{
-          min-height: 220px;
-          background: linear-gradient(90deg, rgba(0,0,0,.05) 25%, rgba(0,0,0,.08) 37%, rgba(0,0,0,.05) 63%);
-          background-size: 400% 100%; animation: shimmer 1.2s ease-in-out infinite;
-        }
-        @keyframes shimmer{ 0%{background-position:100% 0} 100%{background-position:-100% 0} }
-
-        .choices-band{ width:100%; min-height: var(--choices-h); }
-
-        .onboard-panel{
-          max-width: 640px;
-          margin: 0.5rem auto 1.25rem auto;
-          padding: 1rem 1.25rem;
-          background: var(--secondary-background-color);
-          border: 1px solid rgba(49,51,63,.18);
-          border-radius: 12px;
-          box-shadow: 0 1px 2px rgba(0,0,0,.05);
-        }
-        .onboard-panel h1, .onboard-panel h2, .onboard-panel h3{ margin-top: .2rem; margin-bottom: .6rem; }
-        .onboard-panel [data-testid="column"]{ gap: .5rem; }
-    </style>
-    """, unsafe_allow_html=True)
 
     # Sidebar (no illustration controls)
     try:
@@ -1750,16 +1685,26 @@ def main():
 
 
     if not st.session_state.get("is_dead", False) and not is_story_complete(st.session_state):
-        choices_ph.markdown('<div class="choices-band"></div>', unsafe_allow_html=True)
-        render_choices_grid(
-            choices_ph,
-            choices=st.session_state.get("choices", []),
-            generating=False,
-            count=CHOICE_COUNT
-        )
+        current_choices = list(st.session_state.get("choices", []))
+
+        # NEW: two placeholders, side-by-side in the DOM
+        choices_marker = st.empty()
+        choices_container = st.empty()
+
+        # Marker div (no content, just for CSS anchoring)
+        choices_marker.markdown('<div class="choices-wrap"></div>', unsafe_allow_html=True)
+
+        # Buttons go in the *next* sibling block
+        render_choices_grid(choices_container, choices=current_choices, generating=False, count=CHOICE_COUNT)
+
         st.session_state["t_choices_visible_at"] = time.time()
     else:
-        choices_ph.empty()
+        # Clear both if you want
+        try:
+            choices_marker.empty()
+            choices_container.empty()
+        except NameError:
+            pass
 
     if not st.session_state.get("display_illustration_url"):
         try:
