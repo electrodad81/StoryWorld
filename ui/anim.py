@@ -17,7 +17,10 @@ def inject_css(enabled: bool = True) -> None:
                 """
 
 <style>
-:root { --story-body-width: 680px; }
+:root{
+  --story-body-width: 680px;   /* default for desktop/tablet */
+  --story-side-gutter: 12px;   /* tiny padding for phones */
+}
 
 
 /* Anchor width for the story content */
@@ -87,6 +90,55 @@ div[data-testid="stVerticalBlock"]:has(.story-body) [data-testid="column"]{
   padding-right: 6px !important;
 }
 
+/* ========================================================*/
+/* Medium screens (large phones / small tablets, portrait) */
+@media (max-width: 820px){
+  :root{ --story-body-width: min(92vw, 640px); }
+}
+
+/* Phones (portrait) */
+@media (max-width: 480px){
+  :root{
+    /* full viewport minus a little gutter so nothing touches the edges */
+    --story-body-width: calc(100vw - (var(--story-side-gutter) * 2));
+  }
+
+  /* Center the story column and its siblings that we clamp via :has(.story-body) */
+  .story-window .storybox,
+  .illus-inline,
+  .illus-sep,
+  div[data-testid="stVerticalBlock"]:has(.story-body){
+    margin-left: auto !important;
+    margin-right: auto !important;
+  }
+
+  /* Comfortable reading size on phones */
+  .story-window .storybox{
+    padding: .85rem 1rem;
+    font-size: 1.1rem;
+    line-height: 1.55;
+    box-sizing: border-box;   /* include border in width to avoid overflow */
+  }
+
+  /* Buttons: fill the clamped width cleanly */
+  div[data-testid="stVerticalBlock"]:has(.story-body) .stButton > button{
+    width: 100% !important;
+    padding: 12px 14px;
+    font-size: 1rem;
+  }
+
+  /* Slightly tighter vertical rhythm */
+  .illus-inline{ margin: .5rem 0 .8rem 0 !important; }
+  .illus-sep{ margin: .3rem 0 .5rem 0 !important; }
+}
+
+/* Safety: never allow horizontal scrolling due to accidental overflow */
+html, body, [data-testid="stAppViewContainer"]{
+  overflow-x: hidden;
+}
+
+/* Make sure images never overflow their boxes on tiny screens */
+img{ max-width: 100%; height: auto; }
 </style>
 
                 """,
