@@ -18,27 +18,41 @@ client = OpenAI()
 # ---------------- Image prompt safety helpers ----------------
 
 # Words/phrases we want to down-tone for image gen (not for story text)
-_REPLACEMENTS = {
-    # graphic violence / gore
-    r"\b(blood|bloody|bloodied|gore|gory|guts|entrails|viscera|corpse|cadaver|mutilated|severed|dismembered|decapitat\w*)\b": "damage",
-    r"\b(wound|wounded|bleed\w*|stab\w*|slash\w*|maim\w*|butcher\w*|impale\w*)\b": "injury",
-    r"\b(skull|brain|decay|rotting|putrid)\b": "remains",
-    # sexual / nudity
-    r"\b(nude|nudity|breast\w*|genital\w*|erotic|sexual|sex|porn\w*)\b": "tasteful attire",
-    # self-harm or extreme
-    r"\b(suicide|self[-\s]?harm|hang(ed|ing)|cutting)\b": "danger",
-    # weapons → neutral descriptions
-    r"\b(shotgun|rifle|pistol|gun|revolver|assault rifle|uzi|ak-?47)\b": "weapon",
-    r"\b(grenade|bomb|explosive\w*)\b": "dangerous device",
-}
+_REPLACEMENTS = [
+    # gore/explicit -> softened
+    (r"\b(blood|bloody|bloodied|gore|gory|guts|entrails|viscera|corpse|cadaver|mutilated|severed|dismembered|decapitat\w*)\b", "damage"),
+    (r"\b(wound|wounded|bleed\w*|stab\w*|slash\w*|maim\w*|butcher\w*|impale\w*)\b", "injury"),
+    (r"\b(skull|brain|decay|rotting|putrid)\b", "remains"),
+    (r"\b(nude|nudity|breast\w*|genital\w*|erotic|sexual|sex|porn\w*)\b", "tasteful attire"),
+    (r"\b(suicide|self[-\s]?harm|hang(ed|ing)|cutting)\b", "danger"),
+    # firearms/explosives -> medieval analogs
+    (r"\b(shotgun|rifle|pistol|handgun|gun|revolver|smg|submachine|uzi|ak-?47|ar-?15|carbine|bullet|ammo|magazine|shell|cartridge)\b", "sword"),
+    (r"\b(musket|flintlock|arquebus|blunderbuss)\b", "crossbow"),
+    (r"\b(grenade|bomb|dynamite|explosive\w*)\b", "alchemy vial"),
+    # modern clothing -> medieval
+    (r"\b(trench\s?coat|trenchcoat|peacoat|greatcoat|overcoat|duster)\b", "hooded cloak"),
+    (r"\b(suit|tuxedo|necktie|tie|blazer)\b", "tunic"),
+    (r"\b(fedora|trilby|bowler|top\s?hat|newsboy cap)\b", "hood"),
+    # modern tech/props -> medieval
+    (r"\b(camera|photograph|selfie|phone|smartphone|cell\s?phone|radio|microphone|speaker|laptop|computer|tablet)\b", "lantern"),
+    (r"\b(flashlight|electric\s?torch)\b", "torch"),
+    # transport/infrastructure -> medieval
+    (r"\b(car|truck|van|bus|train|subway|tram|airplane|jet|helicopter)\b", "horse cart"),
+    (r"\b(skyscraper|elevator|escalator|billboard|neon|streetlight|traffic light|power\s?line|telephone pole|asphalt)\b", "stone tower"),
+    # modern textiles
+    (r"\b(jeans|t-?shirt|hoodie|sneakers)\b", "woolen garments"),
+]
 
-# Sentences containing these get *omitted* at higher safety levels
 _HARD_FILTER = [
     r"\bsever(ed|ing)\b", r"\bdismember(ed|ment)\b", r"\bdecapitat\w*\b",
     r"\bguts\b", r"\bentrails\b", r"\bviscera\b", r"\bgraphic\b",
     r"\bsex|sexual|erotic\b", r"\bnude|nudity\b",
+    # modern elements (drop the entire sentence at level ≥2)
+    r"\b(shotgun|rifle|pistol|handgun|gun|revolver|musket|flintlock|arquebus|blunderbuss|bullet|ammo|magazine|cartridge)\b",
+    r"\b(trench\s?coat|trenchcoat|peacoat|greatcoat|overcoat|duster|suit|tuxedo|necktie|blazer|fedora|trilby|bowler|top\s?hat)\b",
+    r"\b(camera|photograph|phone|smartphone|cell\s?phone|radio|microphone|speaker|laptop|computer|tablet|flashlight)\b",
+    r"\b(car|truck|van|bus|train|subway|tram|airplane|jet|helicopter|skyscraper|neon|streetlight|traffic light|power\s?line)\b",
 ]
-
 # Keep prompt short & visual
 _MAX_TOKENS_APPROX = 120  # rough char budget; DALL·E likes concise prompts
 
@@ -99,28 +113,43 @@ def generate_illustration(scene: str, simple: bool = True) -> Tuple[Optional[str
     # ---- Basic style only ----
     def _basic_style() -> str:
         return (
-            "Simple, clean black-and-white line-and-wash with a single colored highlight. "
-            "Minimal hatching, clear contours, single focal subject, medium or close-up shot. "
-            "Lighthearted adventure tone. The background behind the image subject should be plain white. "
-            "Careful crosshatching. Do not show the protagonist's face directly."
+            "Simple, clean black-and-white line-and-wash illustration with a single spot color accent "
+            "(gold leaf or lapis). Light crosshatching, clear contours, single focal subject, "
+            "medium or close-up shot. Plain white background behind the subject. "
+            "Pre-industrial medieval-fantasy era (roughly 12th–16th century aesthetic). "
+            "Architecture: stone keeps, timber framing, castles, market stalls; natural materials "
+            "like wood, leather, linen, iron. Props/weapons allowed: swords, daggers, axes, spears, "
+            "shields, bows, torches, lanterns, books, scrolls, potions. "
+            "Strictly no firearms or explosives, no modern clothing (no trenchcoats, suits, ties), "
+            "no modern tech/vehicles (no cameras, phones, radios, cars, trains, planes, neon, streetlights, power lines). "
+            "Do not depict the protagonist’s face directly (use silhouette, hood, or a cropped angle)."
         )
 
-    # ---- Sanitizer (levels 1→3 increase safety) ----
     _REPLACEMENTS = [
-        # (pattern, replacement)
+        # gore/explicit -> softened
         (r"\b(blood|bloody|bloodied|gore|gory|guts|entrails|viscera|corpse|cadaver|mutilated|severed|dismembered|decapitat\w*)\b", "damage"),
         (r"\b(wound|wounded|bleed\w*|stab\w*|slash\w*|maim\w*|butcher\w*|impale\w*)\b", "injury"),
         (r"\b(skull|brain|decay|rotting|putrid)\b", "remains"),
         (r"\b(nude|nudity|breast\w*|genital\w*|erotic|sexual|sex|porn\w*)\b", "tasteful attire"),
         (r"\b(suicide|self[-\s]?harm|hang(ed|ing)|cutting)\b", "danger"),
-        (r"\b(shotgun|rifle|pistol|gun|revolver|assault rifle|uzi|ak-?47)\b", "weapon"),
-        (r"\b(grenade|bomb|explosive\w*)\b", "dangerous device"),
+        # firearms/explosives -> medieval analogs
+        (r"\b(shotgun|rifle|pistol|handgun|gun|revolver|smg|submachine|uzi|ak-?47|ar-?15|carbine|bullet|ammo|magazine|shell|cartridge)\b", "sword"),
+        (r"\b(musket|flintlock|arquebus|blunderbuss)\b", "crossbow"),
+        (r"\b(grenade|bomb|dynamite|explosive\w*)\b", "alchemy vial"),
+        # modern clothing -> medieval
+        (r"\b(trench\s?coat|trenchcoat|peacoat|greatcoat|overcoat|duster)\b", "hooded cloak"),
+        (r"\b(suit|tuxedo|necktie|tie|blazer)\b", "tunic"),
+        (r"\b(fedora|trilby|bowler|top\s?hat|newsboy cap)\b", "hood"),
+        # modern tech/props -> medieval
+        (r"\b(camera|photograph|selfie|phone|smartphone|cell\s?phone|radio|microphone|speaker|laptop|computer|tablet)\b", "lantern"),
+        (r"\b(flashlight|electric\s?torch)\b", "torch"),
+        # transport/infrastructure -> medieval
+        (r"\b(car|truck|van|bus|train|subway|tram|airplane|jet|helicopter)\b", "horse cart"),
+        (r"\b(skyscraper|elevator|escalator|billboard|neon|streetlight|traffic light|power\s?line|telephone pole|asphalt)\b", "stone tower"),
+        # modern textiles
+        (r"\b(jeans|t-?shirt|hoodie|sneakers)\b", "woolen garments"),
     ]
-    _HARD_FILTER = [
-        r"\bsever(ed|ing)\b", r"\bdismember(ed|ment)\b", r"\bdecapitat\w*\b",
-        r"\bguts\b", r"\bentrails\b", r"\bviscera\b", r"\bgraphic\b",
-        r"\bsex|sexual|erotic\b", r"\bnude|nudity\b",
-    ]
+
 
     def _strip_quotes(s: str) -> str:
         return s.replace("“", "\"").replace("”", "\"").replace("’", "'").replace("‘", "'")
@@ -152,8 +181,8 @@ def generate_illustration(scene: str, simple: bool = True) -> Tuple[Optional[str
 
         if level >= 3:
             # Environment-only, no distress; keep it short and visual.
-            src = ("atmospheric fantasy environment, focus on landscape, architecture and props; "
-                   "no depiction of injuries or explicit danger")
+            src = ("atmospheric medieval-fantasy environment; focus on landscape, props, and architecture; "
+       "no modern elements, no depiction of injuries")
 
         safety = "family-friendly, PG-13, no gore, no explicit injuries, no nudity"
         return _truncate(f"{src}. {safety}.")
@@ -215,8 +244,8 @@ def generate_illustration(scene: str, simple: bool = True) -> Tuple[Optional[str
     # Final fallback: very tame environment prompt
     fallback_prompt = (
         f"{_basic_style()} "
-        "Atmospheric fantasy environment, tranquil mood; focus on scenery and architecture; "
-        "no characters in distress, no injuries, no weapons; family-friendly, PG-13. "
+        "Atmospheric medieval-fantasy environment; focus on scenery and architecture; "
+        "no modern elements, no characters in distress, no firearms or explosives; family-friendly, PG-13. "
         f"{gdir}"
     )
     for model_name in models:

@@ -35,7 +35,7 @@ OUTPUT RULES (very important):
 scene_prompt = dedent("""
 Generate the opening scene in this dark-fantasy world.
 - Use middle-school reading level: simple vocabulary, short sentences.
-- Keep it PG-13 (hint at danger rather than explicit gore).
+- Keep it PG (hint at danger rather than explicit gore).
 - Include one subtle hook tied to the lore (e.g., a faction, location, relic, or curse).
 - End naturally (no meta text).
 

@@ -7,3 +7,6 @@ __pycache__/
 # Streamlit secrets & local DB
 .streamlit/secrets.toml
 storyworld.db
+*.db
+*.db-shm
+*.db-wal
