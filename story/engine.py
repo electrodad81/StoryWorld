@@ -11,6 +11,10 @@ from openai import OpenAI
 # Expect OPENAI_API_KEY in environment
 client = OpenAI()
 
+def render_exploration(pid: str) -> None:
+    """Placeholder exploration renderer."""
+    st.write("Exploration mode is under construction.")
+
 # ----------------------------------------------------------------------------- 
 # Illustration helper
 # -----------------------------------------------------------------------------

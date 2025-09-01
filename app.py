@@ -1362,17 +1362,9 @@ def onboarding(pid: str):
             _soft_rerun()
         st.markdown('</div>', unsafe_allow_html=True)
 
-# =============================================================================
-# Main
-# =============================================================================
-def main():
-    st.set_page_config(page_title=APP_TITLE, page_icon="🕯️", layout="wide")
+def render_story(pid: str) -> None:
+    """Render the classic story mode."""
 
-    inject_css()
-    ensure_keys()
-    init_db()
-
-    pid = resolve_pid()
     # Try restoring if memory is empty
     _maybe_restore_from_snapshot(pid)
 
@@ -1721,7 +1713,34 @@ def main():
         choices_ph.markdown(recap_html, unsafe_allow_html=True)
         st.session_state["t_choices_visible_at"] = None
         return
-
+    
+def render_explore(pid: str) -> None:
+    """Render exploration mode via the exploration modules."""
+    from explore.engine import render_exploration
+    render_exploration(pid)
+def _explore_mode_enabled() -> bool:
+    """Return True if exploration mode is requested."""
+    try:
+        qp = st.query_params if hasattr(st, "query_params") else st.experimental_get_query_params()
+        flag = qp.get("explore")
+        if isinstance(flag, list):
+            flag = flag[0]
+        if flag is not None:
+            return _to_bool(flag, default=False)
+    except Exception:
+        pass
+    env = _from_secrets_or_env("EXPLORE", "EXPLORE_MODE", "ENABLE_EXPLORE")
+    return _to_bool(env, default=False)
+def main() -> None:
+    st.set_page_config(page_title=APP_TITLE, page_icon="🕯️", layout="wide")
+    inject_css()
+    ensure_keys()
+    init_db()
+    pid = resolve_pid()
+    if _explore_mode_enabled():
+        render_explore(pid)
+    else:
+        render_story(pid)
     
 if __name__ == "__main__":
     main()
