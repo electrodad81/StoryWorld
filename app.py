@@ -1749,9 +1749,46 @@ def render_explore(pid: str) -> None:
     """Render exploration mode via the exploration modules."""
     from explore.engine import render_explore as _render
 
+    # Sidebar controls (start/reset) just like story mode
+    try:
+        action = sidebar_controls(pid)
+    except Exception:
+        action = None
+
     # Exploration skips onboarding, so make sure it's hidden and keep a sidebar
     # with developer tools just like story mode.
     st.session_state["onboard_dismissed"] = True
+
+    # Handle sidebar actions
+    if action == "start":
+        try:
+            delete_snapshot(pid)
+        except Exception:
+            pass
+        for k in (
+            "scene",
+            "choices",
+            "history",
+            "pending_choice",
+            "is_generating",
+            "t_choices_visible_at",
+            "t_scene_start",
+            "explore_ill_future",
+            "explore_illustration_url",
+            "explore_poll_count",
+            "scene_count",
+            "is_dead",
+            "__recap_html",
+        ):
+            st.session_state.pop(k, None)
+        st.session_state["run_seed"] = uuid.uuid4().hex
+        st.session_state["pending_choice"] = "__start__"
+        st.session_state["is_generating"] = True
+        st.session_state["scene_count"] = 0
+        st.session_state["story_mode"] = False
+        _soft_rerun()
+    elif action == "reset":
+        hard_reset_app(pid)
 
     with st.sidebar:
         if DEV_UI_ALLOWED:
@@ -1774,6 +1811,7 @@ def render_explore(pid: str) -> None:
             )
 
     _render(pid)
+    
 def _explore_mode_enabled() -> bool:
     """Return True if exploration mode is requested."""
     # Session state selection takes precedence

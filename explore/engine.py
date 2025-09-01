@@ -115,6 +115,7 @@ def ensure_explore_keys() -> None:
     st.session_state.setdefault("explore_poll_count", 0)
     st.session_state.setdefault("scene_count", 0)
     st.session_state.setdefault("onboard_dismissed", True)
+    st.session_state.setdefault("explore_illustration_every", 3)
 
 # -----------------------------------------------------------------------------
 # Core loop
@@ -145,8 +146,13 @@ def _advance_turn(story_ph, illus_ph, sep_ph, choices_ph) -> None:
     history.append({"role": "assistant", "content": scene_text})
     st.session_state["scene_count"] = st.session_state.get("scene_count", 0) + 1
 
-    _start_illustration_job(scene_text)
-    _render_illustration_inline(illus_ph, None, "Illustration brewing…")
+    ill_every = int(st.session_state.get("explore_illustration_every", 3))
+    scene_index = st.session_state["scene_count"]
+    if scene_index % ill_every == 1:
+        _start_illustration_job(scene_text)
+        _render_illustration_inline(illus_ph, None, "Illustration brewing…")
+    else:
+        _render_illustration(illus_ph)
     _render_separator(sep_ph)
 
     choices = generate_choices(history, scene_text, LORE) or []
