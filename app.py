@@ -234,6 +234,8 @@ def _maybe_restore_from_snapshot(pid: str) -> bool:
     if img:
         st.session_state["display_illustration_url"] = img
         st.session_state["last_illustration_url"]   = img
+        # best guess: current scene index is len(history) + 1
+        st.session_state["display_illustration_scene"] = len(st.session_state.get("history", [])) + 1
 
     # Player profile (so onboarding won’t show)
     st.session_state["player_name"]      = snap.get("username") or st.session_state.get("player_name")
@@ -303,6 +305,7 @@ def _start_illustration_job(seed_sentence: str, simple: bool, scene_index: Optio
     if scene_index is not None:
         by_scene = st.session_state.setdefault("ill_job_by_scene", {})
         by_scene[str(scene_index)] = {"key": key}
+        by_scene[str(scene_index)] = {"key": key, "scene_index": scene_index}
         st.session_state["ill_job_by_scene"] = by_scene
 
     return key
@@ -436,6 +439,7 @@ def render_persistent_illustration(illus_ph, scene_index: int, initial_wait_ms: 
             if img_ref:
                 # show + persist
                 st.session_state["display_illustration_url"] = img_ref
+                st.session_state["display_illustration_scene"] = scene_index
                 st.session_state["last_illustration_url"] = img_ref
                 st.session_state["last_illustration_debug"] = dbg
                 try:
@@ -464,6 +468,7 @@ def render_persistent_illustration(illus_ph, scene_index: int, initial_wait_ms: 
                     img_ref, dbg = res if (isinstance(res, tuple) and len(res) == 2) else (res, {})
                     if img_ref:
                         st.session_state["display_illustration_url"] = img_ref
+                        st.session_state["display_illustration_scene"] = scene_index
                         st.session_state["last_illustration_url"] = img_ref
                         st.session_state["last_illustration_debug"] = dbg
                         try:
@@ -486,8 +491,10 @@ def _gentle_autorefresh_for_scene(scene_index: int, delay: float = 1.0, max_poll
     If the illustration job for this scene is still pending and nothing is displayed yet,
     schedule a very light rerun loop (scene-scoped, capped) to swap the image when ready.
     """
-    # Already have something to show? Don't rerun.
-    if st.session_state.get("display_illustration_url"):
+    # Already have the correct scene's illustration? Don't rerun.
+    cur_url = st.session_state.get("display_illustration_url")
+    cur_scene = st.session_state.get("display_illustration_scene")
+    if cur_url and cur_scene == scene_index:
         return
 
     # Find the job bound to this scene
@@ -495,7 +502,7 @@ def _gentle_autorefresh_for_scene(scene_index: int, delay: float = 1.0, max_poll
     ref = by_scene.get(str(scene_index))
     job = st.session_state.get("ill_jobs", {}).get(ref["key"]) if ref else None
     fut = job.get("future") if job else None
-    if not fut or fut.done():
+    if not fut:
         return
 
     # Throttle per scene
@@ -507,6 +514,10 @@ def _gentle_autorefresh_for_scene(scene_index: int, delay: float = 1.0, max_poll
 
     polls[k] = c + 1
     st.session_state["ill_polls"] = polls
+
+    if fut.done():
+        _soft_rerun()
+        return
 
     time.sleep(delay)
     _soft_rerun()
@@ -864,8 +875,10 @@ def render_persistent_illustration(illus_ph, scene_text_or_ix, initial_wait_ms: 
         # prefer your per-scene seed map, fallback to the current scene text
         seed_map = st.session_state.get("ill_seed_by_scene", {})
         scene_text = seed_map.get(str(scene_text_or_ix), "") or st.session_state.get("scene", "")
+        scene_index = scene_text_or_ix
     else:
         scene_text = (scene_text_or_ix or st.session_state.get("scene", ""))
+        scene_index = int(st.session_state.get("scene_count", 0))
 
     simple_flag = bool(st.session_state.get("simple_cyoa", True))
     url = st.session_state.get("display_illustration_url")
@@ -908,7 +921,15 @@ def render_persistent_illustration(illus_ph, scene_text_or_ix, initial_wait_ms: 
             img_ref, dbg = res if (isinstance(res, tuple) and len(res) == 2) else (res, {})
             if img_ref:
                 st.session_state["display_illustration_url"] = img_ref
+                st.session_state["display_illustration_scene"] = scene_index
                 st.session_state["last_illustration_debug"] = dbg
+                st.session_state["last_illustration_url"] = img_ref
+                try:
+                    store = _illustration_store()
+                    for k in _scene_keys_for(scene_text, simple_flag):
+                        store[k] = img_ref
+                except Exception:
+                    pass
                 url = img_ref
         _render()
         return
@@ -929,7 +950,15 @@ def render_persistent_illustration(illus_ph, scene_text_or_ix, initial_wait_ms: 
                     img_ref, dbg = res if (isinstance(res, tuple) and len(res) == 2) else (res, {})
                     if img_ref:
                         st.session_state["display_illustration_url"] = img_ref
+                        st.session_state["display_illustration_scene"] = scene_index
                         st.session_state["last_illustration_debug"] = dbg
+                        st.session_state["last_illustration_url"] = img_ref
+                        try:
+                            store = _illustration_store()
+                            for k in _scene_keys_for(scene_text, simple_flag):
+                                store[k] = img_ref
+                        except Exception:
+                            pass
                         url = img_ref
                 break
             time.sleep(0.05)
@@ -994,6 +1023,7 @@ def ensure_keys():
     st.session_state.setdefault("beat_log", [])
     # --- persistent illustration buffer ---
     st.session_state.setdefault("display_illustration_url", None)
+    st.session_state.setdefault("display_illustration_scene", None)
     st.session_state.setdefault("ill_seed_by_scene", {})  # {scene_index: seed}
     st.session_state.setdefault("ill_job_by_scene", {})   # {scene_index: {"key": str}}
 
@@ -1285,7 +1315,7 @@ def _advance_turn(pid: str, story_slot, sep_slot, illus_slot, grid_slot, anim_en
     # queue illustration for the *next* scene if that next scene will show art
     simple_flag = bool(st.session_state.get("simple_cyoa", True))
     if st.session_state.get("auto_illustrate", True):
-        next_index = scene_index + 1
+        next_index = scene_index + ILLUSTRATION_EVERY_N
         if _should_illustrate(next_index):
             seed = _has_first_sentence(full) or " ".join(full.split()[:18]) + "…"
             if seed.strip():
@@ -1320,15 +1350,15 @@ def onboarding(pid: str):
         )
         st.caption("🔒 Archetypes coming soon.")
 
-        # Force display to Story Mode (disabled) so users see it but can't switch yet
+        # Allow testers to toggle between story and exploration modes
         mode = st.radio(
             "Mode",
-            options=["Story Mode", "Exploration (coming soon)"],
-            index=0,                 # show Story Mode selected
-            disabled=True,
-            help="Exploration mode is coming soon. Story Mode is active for now."
+            options=["Story Mode", "Exploration Mode"],
+            index=0,
+            help="Story Mode follows a guided narrative. Exploration Mode is free-roam.",
         )
-        st.caption("🔒 coming soon.")
+        if mode == "Exploration Mode":
+            st.caption("⚠️ Exploration Mode is experimental.")
 
         c1, c2 = st.columns(2)
         begin = c1.button(
@@ -1696,6 +1726,7 @@ def render_story(pid: str) -> None:
                 if cached_url:
                     st.session_state["display_illustration_url"] = cached_url
                     st.session_state["last_illustration_url"]   = cached_url
+                    st.session_state["display_illustration_scene"] = st.session_state.get("scene_count", 1)
                     break
         except Exception:
             pass
@@ -1716,10 +1747,39 @@ def render_story(pid: str) -> None:
     
 def render_explore(pid: str) -> None:
     """Render exploration mode via the exploration modules."""
-    from explore.engine import render_exploration
-    render_exploration(pid)
+    from explore.engine import render_explore as _render
+
+    # Exploration skips onboarding, so make sure it's hidden and keep a sidebar
+    # with developer tools just like story mode.
+    st.session_state["onboard_dismissed"] = True
+
+    with st.sidebar:
+        if DEV_UI_ALLOWED:
+            st.session_state["_dev"] = st.checkbox(
+                "Developer tools",
+                value=bool(st.session_state.get("_dev", False)),
+                help="Show debug info & self-tests",
+                key="dev_toggle",
+            )
+        else:
+            st.session_state["_dev"] = False
+        if st.session_state.get("_dev"):
+            st.write("Exploration debug")
+            st.json(
+                {
+                    "pending_choice": st.session_state.get("pending_choice"),
+                    "scene_count": st.session_state.get("scene_count"),
+                    "polls": st.session_state.get("explore_poll_count"),
+                }
+            )
+
+    _render(pid)
 def _explore_mode_enabled() -> bool:
     """Return True if exploration mode is requested."""
+    # Session state selection takes precedence
+    if "story_mode" in st.session_state:
+        return not st.session_state.get("story_mode", True)
+    # Fallback to query parameter or environment variable
     try:
         qp = st.query_params if hasattr(st, "query_params") else st.experimental_get_query_params()
         flag = qp.get("explore")
@@ -1731,15 +1791,16 @@ def _explore_mode_enabled() -> bool:
         pass
     env = _from_secrets_or_env("EXPLORE", "EXPLORE_MODE", "ENABLE_EXPLORE")
     return _to_bool(env, default=False)
+
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, page_icon="🕯️", layout="wide")
     inject_css()
     ensure_keys()
-    init_db()
     pid = resolve_pid()
     if _explore_mode_enabled():
         render_explore(pid)
     else:
+        init_db()
         render_story(pid)
     
 if __name__ == "__main__":
