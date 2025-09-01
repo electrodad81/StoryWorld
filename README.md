@@ -12,6 +12,7 @@
 - **Persistent sessions** — Player progress is stored in SQLite by default, or PostgreSQL/Neon if configured.
 - **Custom UI** — Streamlit‑based frontend with animations, a lantern loader, and typewriter‑style text reveal.
 - **Telemetry & logging** — Choice latency, danger streaks, and outcomes are recorded for analysis.
+- **Exploration mode (experimental)** — Toggle via `?explore=1` query param or `EXPLORE=1` environment variable to try the new exploration engine.
 
 ## Getting Started
 
