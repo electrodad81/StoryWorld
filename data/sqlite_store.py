@@ -1,12 +1,24 @@
 # data/sqlite_store.py
 
 from __future__ import annotations
-import os, json, sqlite3
+import os, json, sqlite3, time, threading
 from pathlib import Path
 from contextlib import contextmanager
 
 BASE_DIR = Path(__file__).resolve().parents[1]  # repo root
 DB_PATH = str(BASE_DIR / "story.db")  # stable location
+
+_DB_MUTEX = threading.Lock()
+
+def _exec_retry(conn, sql: str, params=()):
+    for attempt in range(5):
+        try:
+            return conn.execute(sql, params)
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() and attempt < 4:
+                time.sleep(0.05 * (attempt + 1))
+                continue
+            raise
 
 @contextmanager
 def _connect():
@@ -189,5 +201,306 @@ def save_visit(user_id: str, scene: str, choice_text: str | None, choice_index: 
         VALUES (?, ?, ?, ?)
         """,
             (user_id, scene, choice_text, choice_index),
+        )
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Exploration v2 helpers
+# ---------------------------------------------------------------------------
+
+def ensure_explore_schema():
+    """Create exploration-related tables if missing."""
+    with _connect() as conn:
+        _exec_retry(
+            conn,
+            """
+        CREATE TABLE IF NOT EXISTS world_locations(
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        );
+        """,
+        )
+        _exec_retry(
+            conn,
+            """
+        CREATE TABLE IF NOT EXISTS world_npcs(
+            id TEXT PRIMARY KEY,
+            loc_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            traits TEXT NOT NULL DEFAULT '{}',
+            state TEXT NOT NULL DEFAULT '{}'
+        );
+        """,
+        )
+        _exec_retry(
+            conn,
+            """
+        CREATE TABLE IF NOT EXISTS world_objects(
+            id TEXT PRIMARY KEY,
+            loc_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT '{}'
+        );
+        """,
+        )
+        _exec_retry(
+            conn,
+            """
+        CREATE TABLE IF NOT EXISTS world_exits(
+            src_id TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            dst_id TEXT NOT NULL,
+            locked INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (src_id, direction)
+        );
+        """,
+        )
+        _exec_retry(
+            conn,
+            """
+        CREATE TABLE IF NOT EXISTS player_world(
+            player_id TEXT PRIMARY KEY,
+            loc_id TEXT NOT NULL,
+            flags TEXT NOT NULL DEFAULT '[]',
+            inventory TEXT NOT NULL DEFAULT '{}',
+            danger INTEGER NOT NULL DEFAULT 0
+        );
+        """,
+        )
+        _exec_retry(
+            conn,
+            """
+        CREATE TABLE IF NOT EXISTS world_items(
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            traits TEXT NOT NULL DEFAULT '{}',
+            state TEXT NOT NULL DEFAULT '{}'
+        );
+        """,
+        )
+        _exec_retry(
+            conn,
+            """
+        CREATE TABLE IF NOT EXISTS location_items(
+            loc_id TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            qty INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (loc_id, item_id)
+        );
+        """,
+        )
+        _exec_retry(
+            conn,
+            """
+        CREATE TABLE IF NOT EXISTS romance_cooldowns(
+            player_id TEXT NOT NULL,
+            npc_id TEXT NOT NULL,
+            turns INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (player_id, npc_id)
+        );
+        """,
+        )
+        conn.commit()
+
+
+def seed_minimal_world():
+    """Seed a tiny world graph if empty."""
+    with _connect() as conn:
+        cur = _exec_retry(conn, "SELECT COUNT(*) FROM world_locations")
+        count = cur.fetchone()[0]
+        if not count:
+            _exec_retry(conn, "INSERT INTO world_locations(id,name) VALUES ('crossroads','Crossroads')")
+            _exec_retry(conn, "INSERT INTO world_locations(id,name) VALUES ('watch-tower','Watch Tower')")
+            _exec_retry(conn, "INSERT INTO world_locations(id,name) VALUES ('brook','Brook')")
+            exits = [
+                ("crossroads","N","watch-tower"),
+                ("watch-tower","S","crossroads"),
+                ("crossroads","E","brook"),
+                ("brook","W","crossroads"),
+            ]
+            for src, d, dst in exits:
+                _exec_retry(
+                    conn,
+                    "INSERT INTO world_exits(src_id,direction,dst_id,locked) VALUES (?,?,?,0)",
+                    (src, d, dst),
+                )
+            _exec_retry(
+                conn,
+                "INSERT INTO world_items(id,name) VALUES ('lantern','Rusted Lantern')",
+            )
+            _exec_retry(
+                conn,
+                "INSERT INTO world_items(id,name) VALUES ('coin','Ancient Coin')",
+            )
+            _exec_retry(
+                conn,
+                "INSERT INTO location_items(loc_id,item_id,qty) VALUES ('crossroads','lantern',1)"
+            )
+            _exec_retry(
+                conn,
+                "INSERT INTO location_items(loc_id,item_id,qty) VALUES ('watch-tower','coin',1)"
+            )
+        cur = _exec_retry(conn, "SELECT COUNT(*) FROM world_npcs")
+        if not cur.fetchone()[0]:
+            _exec_retry(
+                conn,
+                "INSERT INTO world_npcs(id,loc_id,name) VALUES ('sentinel','watch-tower','Lonely Sentinel')",
+            )
+        conn.commit()
+
+
+def list_location_items(loc_id: str) -> list[dict]:
+    with _connect() as conn:
+        cur = _exec_retry(
+            conn,
+            """
+        SELECT i.id, i.name, li.qty, i.traits, i.state
+        FROM location_items li JOIN world_items i ON li.item_id=i.id
+        WHERE li.loc_id=?
+        """,
+            (loc_id,),
+        )
+        rows = cur.fetchall()
+        return [
+            {
+                "id": r[0],
+                "name": r[1],
+                "qty": r[2],
+                "traits": json.loads(r[3] or "{}"),
+                "state": json.loads(r[4] or "{}"),
+            }
+            for r in rows
+        ]
+
+
+def list_player_inventory(player_id: str) -> dict:
+    with _connect() as conn:
+        cur = _exec_retry(
+            conn, "SELECT inventory FROM player_world WHERE player_id=?", (player_id,)
+        )
+        row = cur.fetchone()
+        if not row:
+            return {}
+        try:
+            return json.loads(row[0] or "{}")
+        except Exception:
+            return {}
+
+
+def _update_player_inventory(conn, player_id: str, inv: dict) -> None:
+    _exec_retry(
+        conn,
+        "UPDATE player_world SET inventory=? WHERE player_id=?",
+        (json.dumps(inv), player_id),
+    )
+
+
+def pickup_item(player_id: str, loc_id: str, item_id: str, qty: int = 1) -> dict:
+    with _connect() as conn, _DB_MUTEX:
+        _exec_retry(conn, "BEGIN IMMEDIATE;")
+        cur = _exec_retry(
+            conn,
+            "SELECT qty FROM location_items WHERE loc_id=? AND item_id=?",
+            (loc_id, item_id),
+        )
+        row = cur.fetchone()
+        if not row or row[0] < qty:
+            conn.rollback()
+            return {"inventory_delta": {}}
+        remaining = row[0] - qty
+        if remaining:
+            _exec_retry(
+                conn,
+                "UPDATE location_items SET qty=? WHERE loc_id=? AND item_id=?",
+                (remaining, loc_id, item_id),
+            )
+        else:
+            _exec_retry(
+                conn,
+                "DELETE FROM location_items WHERE loc_id=? AND item_id=?",
+                (loc_id, item_id),
+            )
+        inv = list_player_inventory(player_id)
+        inv[item_id] = inv.get(item_id, 0) + qty
+        _update_player_inventory(conn, player_id, inv)
+        conn.commit()
+        return {"inventory_delta": {item_id: qty}}
+
+
+def drop_item(player_id: str, loc_id: str, item_id: str, qty: int = 1) -> dict:
+    with _connect() as conn, _DB_MUTEX:
+        _exec_retry(conn, "BEGIN IMMEDIATE;")
+        inv = list_player_inventory(player_id)
+        if inv.get(item_id, 0) < qty:
+            conn.rollback()
+            return {"inventory_delta": {}}
+        inv[item_id] -= qty
+        if inv[item_id] <= 0:
+            inv.pop(item_id, None)
+        _update_player_inventory(conn, player_id, inv)
+        cur = _exec_retry(
+            conn,
+            "SELECT qty FROM location_items WHERE loc_id=? AND item_id=?",
+            (loc_id, item_id),
+        )
+        row = cur.fetchone()
+        if row:
+            _exec_retry(
+                conn,
+                "UPDATE location_items SET qty=? WHERE loc_id=? AND item_id=?",
+                (row[0] + qty, loc_id, item_id),
+            )
+        else:
+            _exec_retry(
+                conn,
+                "INSERT INTO location_items(loc_id,item_id,qty) VALUES (?,?,?)",
+                (loc_id, item_id, qty),
+            )
+        conn.commit()
+        return {"inventory_delta": {item_id: -qty}}
+
+
+def use_item(player_id: str, item_id: str) -> dict:
+    """Simple hook removing one item and returning a generic outcome."""
+    with _connect() as conn, _DB_MUTEX:
+        _exec_retry(conn, "BEGIN IMMEDIATE;")
+        inv = list_player_inventory(player_id)
+        if inv.get(item_id, 0) <= 0:
+            conn.rollback()
+            return {"inventory_delta": {}}
+        inv[item_id] -= 1
+        if inv[item_id] <= 0:
+            inv.pop(item_id, None)
+        _update_player_inventory(conn, player_id, inv)
+        conn.commit()
+    return {
+        "prose": f"You use the {item_id}.",
+        "inventory_delta": {item_id: -1},
+    }
+
+
+def get_romance_cooldown(player_id: str, npc_id: str) -> int:
+    with _connect() as conn:
+        cur = _exec_retry(
+            conn,
+            "SELECT turns FROM romance_cooldowns WHERE player_id=? AND npc_id=?",
+            (player_id, npc_id),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+def set_romance_cooldown(player_id: str, npc_id: str, turns: int) -> None:
+    with _connect() as conn, _DB_MUTEX:
+        _exec_retry(conn, "BEGIN IMMEDIATE;")
+        _exec_retry(
+            conn,
+            """
+        INSERT INTO romance_cooldowns(player_id,npc_id,turns)
+        VALUES (?,?,?)
+        ON CONFLICT(player_id,npc_id) DO UPDATE SET turns=excluded.turns
+        """,
+            (player_id, npc_id, turns),
         )
         conn.commit()

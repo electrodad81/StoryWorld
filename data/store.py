@@ -7,27 +7,35 @@ import streamlit as st
 _DB_URL = os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL")
 _STORE_NAME = "sqlite"
 
-# ---- Default to SQLite (and export save_visit)
-from data.sqlite_store import (  # type: ignore
-    init_db as _init_db_sqlite,
-    save_snapshot as _save_sqlite,
-    load_snapshot as _load_sqlite,
-    delete_snapshot as _delete_sqlite,
-    has_snapshot as _has_sqlite,
-    save_visit as _save_visit_sqlite,
-    save_event as _save_event_sqlite,
-)
+# ---- Default to SQLite (and export helpers)
+from data import sqlite_store as _sqlite_store  # type: ignore
 
 # Default assignments (SQLite)
-init_db = _init_db_sqlite
-save_snapshot = _save_sqlite
-load_snapshot = _load_sqlite
-delete_snapshot = _delete_sqlite
-has_snapshot = _has_sqlite
-save_visit = _save_visit_sqlite
-from data.sqlite_store import save_event as _save_event_sqlite
-save_event = _save_event_sqlite
+init_db = _sqlite_store.init_db
+save_snapshot = _sqlite_store.save_snapshot
+load_snapshot = _sqlite_store.load_snapshot
+delete_snapshot = _sqlite_store.delete_snapshot
+has_snapshot = _sqlite_store.has_snapshot
+save_visit = _sqlite_store.save_visit
+save_event = _sqlite_store.save_event
+ensure_explore_schema = _sqlite_store.ensure_explore_schema
+seed_minimal_world = _sqlite_store.seed_minimal_world
+list_location_items = _sqlite_store.list_location_items
+list_player_inventory = _sqlite_store.list_player_inventory
+pickup_item = _sqlite_store.pickup_item
+drop_item = _sqlite_store.drop_item
+use_item = _sqlite_store.use_item
+get_romance_cooldown = _sqlite_store.get_romance_cooldown
 _STORE_NAME = "sqlite"
+ensure_explore_schema = _sqlite_store.ensure_explore_schema
+seed_minimal_world = _sqlite_store.seed_minimal_world
+list_location_items = _sqlite_store.list_location_items
+list_player_inventory = _sqlite_store.list_player_inventory
+pickup_item = _sqlite_store.pickup_item
+drop_item = _sqlite_store.drop_item
+use_item = _sqlite_store.use_item
+get_romance_cooldown = _sqlite_store.get_romance_cooldown
+set_romance_cooldown = _sqlite_store.set_romance_cooldown
 
 # ---- Prefer Neon if DATABASE_URL is present and module imports cleanly
 if _DB_URL:

@@ -14,6 +14,12 @@
 - **Telemetry & logging** — Choice latency, danger streaks, and outcomes are recorded for analysis.
 - **Exploration mode (experimental)** — Toggle via `?explore=1` query param or `EXPLORE=1` environment variable to try the new exploration engine.
 
+### Exploration v2
+
+The second iteration of exploration adds a lightweight map graph, visible
+non‑player characters (NPCs), items, and a simple romance cooldown system.
+Item pickups, drops, and usage are persisted in the SQLite backend.
+
 ## Getting Started
 
 ### Prerequisites
