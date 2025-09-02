@@ -11,15 +11,17 @@ remains responsive.
 """
 
 import json
+import os
 import pathlib
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional
+from typing import List, Optional, Dict, Generator, Tuple
 
 import streamlit as st
 
 from ui.choices import render_choices_grid
-from story.engine import stream_scene, generate_choices, generate_illustration
+from story.engine import generate_illustration, client
+from explore.prompts import SCENE_SYSTEM_PROMPT, CHOICE_SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +118,70 @@ def _render_illustration(ph) -> None:
 
 
 # ---------------------------------------------------------------------------
+# LLM helpers
+# ---------------------------------------------------------------------------
+
+
+def _history_text(history: List[Dict[str, str]]) -> str:
+    return "\n".join(h.get("content", "") for h in history[-10:])
+
+
+def stream_explore_scene(
+    history: List[Dict[str, str]], lore: Dict
+) -> Generator[str, None, None]:
+    lore_blob = json.dumps(lore)[:10_000]
+    user = (
+        "Continue free-roam exploration.\n"
+        f"--- LORE JSON ---\n{lore_blob}\n--- END LORE ---\n\n"
+        "Player history (latest last):\n"
+        f"{_history_text(history)}\n"
+    )
+    resp = client.chat.completions.create(
+        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        temperature=0.7,
+        max_tokens=350,
+        stream=True,
+        messages=[
+            {"role": "system", "content": SCENE_SYSTEM_PROMPT},
+            {"role": "user", "content": user},
+        ],
+    )
+    for ev in resp:
+        if ev.choices:
+            delta = ev.choices[0].delta.content or ""
+            if delta:
+                yield delta
+
+
+def generate_explore_choices(
+    history: List[Dict[str, str]], last_scene: str, lore: Dict
+) -> List[str]:
+    lore_blob = json.dumps(lore)[:10_000]
+    user = (
+        f"{last_scene}\n\n"
+        "Player history (latest last):\n"
+        f"{_history_text(history)}\n\n"
+        f"--- LORE JSON ---\n{lore_blob}\n--- END LORE ---\n"
+    )
+    resp = client.chat.completions.create(
+        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        temperature=0.7,
+        max_tokens=150,
+        messages=[
+            {"role": "system", "content": CHOICE_SYSTEM_PROMPT},
+            {"role": "user", "content": user},
+        ],
+    )
+    text = resp.choices[0].message.content.strip()
+    try:
+        arr = json.loads(text)
+        return [s.strip().rstrip(".") for s in arr[:CHOICE_COUNT]]
+    except Exception:
+        lines = [ln.strip("-* ") for ln in text.splitlines() if ln.strip()]
+        return lines[:CHOICE_COUNT]
+
+
+# ---------------------------------------------------------------------------
 # Session state helpers
 # ---------------------------------------------------------------------------
 
@@ -132,6 +198,8 @@ def ensure_explore_keys() -> None:
 
     st.session_state.setdefault("scene", "")
     st.session_state.setdefault("choices", [])
+    st.session_state.setdefault("choice_map", {})
+    st.session_state.setdefault("choice_objs", [])
     st.session_state.setdefault("history", [])
     st.session_state.setdefault("is_generating", False)
     st.session_state.setdefault("t_scene_start", None)
@@ -146,6 +214,8 @@ def ensure_explore_keys() -> None:
     st.session_state.setdefault("current_exits", [])
     st.session_state.setdefault("visible_npcs", [])
     st.session_state.setdefault("inventory", [])
+    st.session_state.setdefault("pos", (0, 0))
+    st.session_state.setdefault("visited", {(0, 0): True})
 
     # ``pending_choice`` needs extra care: if a previous mode cleared it we
     # still want exploration to auto-start the first scene.  However, story
@@ -159,21 +229,69 @@ def ensure_explore_keys() -> None:
             st.session_state["pending_choice"] = "__start__"
 
 
-def _update_world_state(scene_text: str, choices: List[str]) -> None:
-    scene_index = st.session_state.get("scene_count", 0)
-    st.session_state["current_location"] = f"Scene {scene_index}"
-    exits = [c for c in choices if c.lower().startswith(("go ", "enter ", "climb ", "descend "))]
+def _dir_to_delta(label: str) -> Tuple[int, int]:
+    s = label.lower()
+    if "north" in s:
+        return (0, 1)
+    if "south" in s:
+        return (0, -1)
+    if "east" in s:
+        return (1, 0)
+    if "west" in s:
+        return (-1, 0)
+    return (0, 0)
+
+
+def _build_ascii_map() -> str:
+    visited = dict(st.session_state.get("visited", {(0, 0): True}))
+    x, y = st.session_state.get("pos", (0, 0))
+    visited[(x, y)] = True
+    xs = [p[0] for p in visited]
+    ys = [p[1] for p in visited]
+    x_min, x_max = min(xs) - 1, max(xs) + 1
+    y_min, y_max = min(ys) - 1, max(ys) + 1
+    lines = []
+    for yy in range(y_max, y_min - 1, -1):
+        row = []
+        for xx in range(x_min, x_max + 1):
+            if (xx, yy) == (x, y):
+                row.append("P")
+            elif (xx, yy) in visited:
+                row.append(".")
+            else:
+                row.append(" ")
+        lines.append("".join(row))
+    return "\n".join(lines)
+
+
+def _update_world_state(scene_text: str, choices: List, picked: Optional[str]) -> None:
+    pos = st.session_state.get("pos", (0, 0))
+    if picked and picked != "__start__":
+        dx, dy = _dir_to_delta(picked)
+        pos = (pos[0] + dx, pos[1] + dy)
+        st.session_state["pos"] = pos
+    visited = dict(st.session_state.get("visited", {}))
+    visited[pos] = True
+    st.session_state["visited"] = visited
+    st.session_state["current_location"] = f"{pos[0]},{pos[1]}"
+    exits = []
+    for c in choices:
+        label = c.get("id") if isinstance(c, dict) else str(c)
+        if _dir_to_delta(label) != (0, 0):
+            exits.append(label)
     st.session_state["current_exits"] = exits
     st.session_state["visible_npcs"] = [
-        {"name": f"NPC {scene_index}", "romance": min(100, scene_index * 10)}
+        {"name": f"NPC {len(visited)}", "romance": min(100, len(visited) * 5)}
     ]
     inv = list(st.session_state.get("inventory", []))
-    if scene_index > 0 and scene_index % 3 == 0:
-        inv.append(f"Relic {scene_index}")
+    if len(visited) % 3 == 0 and f"Relic {len(visited)}" not in inv:
+        inv.append(f"Relic {len(visited)}")
     st.session_state["inventory"] = inv
 
 
 def _render_sidebar_state() -> None:
+    with st.sidebar.expander("Map", expanded=True):
+        st.text(_build_ascii_map())
     with st.sidebar.expander("Adventurer's Notes", expanded=True):
         st.markdown(
             f"**Location:** {st.session_state.get('current_location', 'Unknown')}"
@@ -204,22 +322,35 @@ def _render_sidebar_state() -> None:
 
 
 def _advance_turn(story_ph, illus_ph, sep_ph, choices_ph) -> None:
-    choice = st.session_state.get("pending_choice", "__start__")
+    choice_label = st.session_state.get("pending_choice", "__start__")
     st.session_state["pending_choice"] = None
+    choice_map = st.session_state.get("choice_map", {})
+    choice = choice_map.get(choice_label, choice_label)
     history = st.session_state.get("history", [])
     if choice and choice != "__start__":
         history.append({"role": "user", "content": choice})
     st.session_state["t_scene_start"] = time.time()
-    gen = stream_scene(history, LORE)
+    gen = stream_explore_scene(history, LORE)
     buf = []
     for chunk in gen:
         buf.append(chunk or "")
-        text = "".join(buf)
-        story_ph.markdown(
-            f'<div class="story-window"><div class="storybox">{text}<span class="typing-caret"></span></div></div>',
-            unsafe_allow_html=True,
-        )
-    scene_text = "".join(buf)
+    raw_text = "".join(buf)
+    scene_text = raw_text
+    choice_objs: List = []
+    try:
+        data = json.loads(raw_text)
+        scene_text = data.get("scene", raw_text)
+        choice_objs = data.get("choices") or []
+        items = data.get("items") or []
+        if items:
+            inv = list(st.session_state.get("inventory", []))
+            for itm in items:
+                name = itm.get("name") if isinstance(itm, dict) else str(itm)
+                if name not in inv:
+                    inv.append(name)
+            st.session_state["inventory"] = inv
+    except Exception:
+        pass
     story_ph.markdown(
         f'<div class="story-window"><div class="storybox">{scene_text}</div></div>',
         unsafe_allow_html=True,
@@ -237,17 +368,28 @@ def _advance_turn(story_ph, illus_ph, sep_ph, choices_ph) -> None:
         _render_illustration(illus_ph)
     _render_separator(sep_ph)
 
-    choices = generate_choices(history, scene_text, LORE) or []
-    st.session_state["choices"] = choices[:CHOICE_COUNT]
+    if not choice_objs:
+        choice_labels = generate_explore_choices(history, scene_text, LORE) or []
+        choice_objs = choice_labels
+    st.session_state["choice_objs"] = choice_objs
+    if choice_objs and isinstance(choice_objs[0], dict):
+        labels = [c.get("label", "") for c in choice_objs]
+        st.session_state["choice_map"] = {
+            c.get("label", ""): c.get("id", c.get("label", "")) for c in choice_objs
+        }
+    else:
+        labels = [str(c) for c in choice_objs]
+        st.session_state["choice_map"] = {lbl: lbl for lbl in labels}
+    st.session_state["choices"] = labels[:CHOICE_COUNT]
     st.session_state["is_generating"] = False
     with choices_ph.container():
         st.markdown('<div class="story-body">', unsafe_allow_html=True)
         slot = st.container()
         render_choices_grid(
-            slot, choices=choices, generating=False, count=CHOICE_COUNT
+            slot, choices=labels, generating=False, count=CHOICE_COUNT
         )
     st.session_state["t_choices_visible_at"] = time.time()
-    _update_world_state(scene_text, choices)
+    _update_world_state(scene_text, choice_objs, choice)
 
 
 # ---------------------------------------------------------------------------

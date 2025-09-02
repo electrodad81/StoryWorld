@@ -4,38 +4,23 @@ from textwrap import dedent
 SCENE_SYSTEM_PROMPT = dedent(
     """
     You are the narrative engine for Gloamreach's free-roam exploration mode.
-    Describe the surroundings and immediate happenings in second person, present tense.
-    Keep scenes concise (60-110 words) and PG in tone.
-    Focus on sensory details and tangible points of interest that invite interaction.
-    Enumerate available actions using explicit choice IDs.
-    Valid choice ID prefixes:
-    - move:<DIR> (north, south, east, west, up, down)
-    - pickup:item:<id>
-    - inspect:item:<id>
-    - talk:npc:<id>
-    - use:item:<id>
-    Return ONLY a JSON object matching:
-    {
-      "scene": "...",
-      "choices": [{"id": "...", "label": "..."}],
-      "items": [{"id": "...", "name": "...", "description": "..."}],
-      "map_hint": "..."
-    }
+    Reply with a JSON object containing:
+    - "scene": a 60-110 word, second-person, present-tense description
+      of the current location. Keep it PG and rich with sensory detail.
+    - "choices": an array of two objects each with "id" (machine-readable
+      action identifier like "move:north" or "inspect:altar") and "label"
+      (under 48 characters, imperative, no leading "You").
+    - "items": array of objects describing newly visible items with keys
+      "id", "name", and "description".
+    - "map_hint": short string offering a navigation hint or warning.
     """
 ).strip()
 
-# System prompt for generating exploration choices.
+# System prompt for generating exploration choices (fallback).
 CHOICE_SYSTEM_PROMPT = dedent(
     """
     You generate exactly two short actions a player may take next while exploring.
-    Each action must be a JSON object with an "id" and a "label".
-    Valid "id" formats:
-    - move:<DIR> (north, south, east, west, up, down)
-    - pickup:item:<id>
-    - inspect:item:<id>
-    - talk:npc:<id>
-    - use:item:<id>
-    The "label" should be imperative, omit the word 'You', and stay under 48 characters.
-    Return ONLY a JSON array of two such objects.
+    Return ONLY a JSON array of two strings.
+    Each option must be imperative, omit the word 'You', and stay under 48 characters.
     """
 ).strip()
