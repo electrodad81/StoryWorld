@@ -685,6 +685,7 @@ LORE = json.loads(LORE_PATH.read_text(encoding="utf-8")) if LORE_PATH.exists() e
 
 CHOICE_COUNT = 2
 APP_TITLE = "Gloamreach"
+EXPLORE_V2 = st.secrets.get("EXPLORE_V2", True)
 
 # illustrate scenes 1,4,7,...
 ILLUSTRATION_EVERY_N = 3
@@ -1748,6 +1749,10 @@ def render_story(pid: str) -> None:
 def render_explore(pid: str) -> None:
     """Render exploration mode via the exploration modules."""
     from explore.engine import render_explore as _render
+    if EXPLORE_V2:
+        from explore_v2.engine import render_explore as _render
+    else:
+        from explore.engine import render_explore as _render
 
     # Sidebar controls (start/reset) just like story mode
     try:
@@ -1801,17 +1806,24 @@ def render_explore(pid: str) -> None:
         else:
             st.session_state["_dev"] = False
         if st.session_state.get("_dev"):
-            st.write("Exploration debug")
-            st.json(
-                {
-                    "pending_choice": st.session_state.get("pending_choice"),
-                    "scene_count": st.session_state.get("scene_count"),
-                    "polls": st.session_state.get("explore_poll_count"),
-                }
-            )
+            try:
+                if EXPLORE_V2:
+                    from explore_v2.devtools import render_debug_sidebar
+                    render_debug_sidebar(pid)
+                else:
+                    st.write("Exploration debug")
+                    st.json(
+                        {
+                            "pending_choice": st.session_state.get("pending_choice"),
+                            "scene_count": st.session_state.get("scene_count"),
+                            "polls": st.session_state.get("explore_poll_count"),
+                        }
+                    )
+            except Exception as exc:
+                st.warning(f"Dev tools unavailable: {exc}")
 
     _render(pid)
-    
+
 def _explore_mode_enabled() -> bool:
     """Return True if exploration mode is requested."""
     # Session state selection takes precedence

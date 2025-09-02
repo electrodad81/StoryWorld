@@ -121,10 +121,18 @@ def _render_illustration(ph) -> None:
 
 
 def ensure_explore_keys() -> None:
+    """Seed session state for exploration mode.
+
+    Unlike ``setdefault`` alone, this also boots the first scene when switching
+    into exploration after visiting other modes. If no scene has been
+    generated yet (``scene_count`` still 0) and ``pending_choice`` is missing or
+    ``None``, we initialize it to ``"__start__"`` so the engine advances
+    immediately on first render.
+    """
+
     st.session_state.setdefault("scene", "")
     st.session_state.setdefault("choices", [])
     st.session_state.setdefault("history", [])
-    st.session_state.setdefault("pending_choice", "__start__")
     st.session_state.setdefault("is_generating", False)
     st.session_state.setdefault("t_scene_start", None)
     st.session_state.setdefault("t_choices_visible_at", None)
@@ -138,6 +146,17 @@ def ensure_explore_keys() -> None:
     st.session_state.setdefault("current_exits", [])
     st.session_state.setdefault("visible_npcs", [])
     st.session_state.setdefault("inventory", [])
+
+    # ``pending_choice`` needs extra care: if a previous mode cleared it we
+    # still want exploration to auto-start the first scene.  However, story
+    # mode may leave ``scene_count`` non-zero when switching modes, which used
+    # to prevent the first scene from booting.  Detect the absence of any
+    # current scene instead – if no text exists and ``pending_choice`` is
+    # missing, schedule the start marker.
+    if not st.session_state.get("scene"):
+        st.session_state["scene_count"] = 0
+        if not st.session_state.get("pending_choice"):
+            st.session_state["pending_choice"] = "__start__"
 
 
 def _update_world_state(scene_text: str, choices: List[str]) -> None:
