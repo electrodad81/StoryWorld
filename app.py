@@ -1383,15 +1383,16 @@ def onboarding(pid: str):
             st.session_state["pending_choice"]="__start__"
             st.session_state["is_generating"]=True
             st.session_state["scene_count"]=0
-            st.rerun() # one-time rerun so onboarding is gone on the first streaming pass
 
             #st.session_state["run_seed"] = uuid.uuid4().hex  # NEW: fresh seed on first start
 
             st.session_state.pop("is_dead", None)
             st.session_state.pop("__recap_html", None)
 
-            _soft_rerun()
         st.markdown('</div>', unsafe_allow_html=True)
+
+        if begin:
+            _soft_rerun()
 
 def render_story(pid: str) -> None:
     """Render the classic story mode."""
@@ -1656,6 +1657,24 @@ def render_story(pid: str) -> None:
     elif action == "reset":
         hard_reset_app(pid)  # full cold boot to onboarding
 
+    # Placeholder to clear onboarding immediately on rerun
+    onboard_ph = st.empty()
+
+    # Show onboarding ONLY if it hasn't been dismissed AND we're not generating/queued AND no scene yet
+    show_onboarding = (
+        not st.session_state.get("onboard_dismissed", False)
+        and not st.session_state.get("pending_choice")
+        and not st.session_state.get("is_generating", False)
+        and not st.session_state.get("scene")
+    )
+    if show_onboarding:
+        with onboard_ph:
+            maybe_kickoff_opening_illustration()  # pre-queue opening art if needed
+            onboarding(pid)
+        return
+    else:
+        onboard_ph.empty()
+
     # Placeholders in visual order: story → sep → illustration → choices
     story_ph  = st.empty()
     sep_ph    = st.empty()
@@ -1670,18 +1689,6 @@ def render_story(pid: str) -> None:
         # IMPORTANT: do NOT rerun or return here.
         # Fall through to the normal render below so the illustration
         # stays visible and only swaps when ready.
-
-    # Show onboarding ONLY if it hasn't been dismissed AND we're not generating/queued AND no scene yet
-    show_onboarding = (
-        not st.session_state.get("onboard_dismissed", False)
-        and not st.session_state.get("pending_choice")
-        and not st.session_state.get("is_generating", False)
-        and not st.session_state.get("scene")
-    )
-    if show_onboarding:
-        maybe_kickoff_opening_illustration()  # pre-queue opening art if needed
-        onboarding(pid)
-        return
 
     # regular render
     story_html = st.session_state.get("scene") or ""
