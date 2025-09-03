@@ -16,6 +16,7 @@ import pathlib
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Dict, Generator, Tuple
+import re
 
 import streamlit as st
 
@@ -175,10 +176,25 @@ def generate_explore_choices(
     text = resp.choices[0].message.content.strip()
     try:
         arr = json.loads(text)
-        return [s.strip().rstrip(".") for s in arr[:CHOICE_COUNT]]
     except Exception:
-        lines = [ln.strip("-* ") for ln in text.splitlines() if ln.strip()]
-        return lines[:CHOICE_COUNT]
+        m = re.search(r"\[[\s\S]*\]", text)
+        if m:
+            try:
+                arr = json.loads(m.group(0))
+            except Exception:
+                arr = []
+        else:
+            arr = []
+    if arr:
+        return [s.strip().rstrip(".") for s in arr[:CHOICE_COUNT]]
+    lines = [ln.strip("-* ") for ln in text.splitlines() if ln.strip()]
+    if len(lines) == 1 and lines[0].startswith("[") and lines[0].endswith("]"):
+        try:
+            arr = json.loads(lines[0])
+            return [s.strip().rstrip(".") for s in arr[:CHOICE_COUNT]]
+        except Exception:
+            pass
+    return lines[:CHOICE_COUNT]
 
 
 # ---------------------------------------------------------------------------
@@ -331,15 +347,82 @@ def _advance_turn(story_ph, illus_ph, sep_ph, choices_ph) -> None:
         history.append({"role": "user", "content": choice})
     st.session_state["t_scene_start"] = time.time()
     gen = stream_explore_scene(history, LORE)
-    buf = []
+    raw_chunks: List[str] = []
+    scene_chars: List[str] = []
+    state = "seek_key"
+    key_buf = ""
+    escape = False
+    scene_done = False
     for chunk in gen:
-        buf.append(chunk or "")
-    raw_text = "".join(buf)
-    scene_text = raw_text
+        raw_chunks.append(chunk or "")
+        scene_updated = False
+        for ch in chunk:
+            if scene_done:
+                continue
+            if state == "seek_key":
+                if ch == '"':
+                    state = "read_key"
+                    key_buf = ""
+            elif state == "read_key":
+                if ch == '"':
+                    state = "post_key" if key_buf == "scene" else "seek_key"
+                else:
+                    key_buf += ch
+            elif state == "post_key":
+                if ch == ':':
+                    state = "pre_value"
+                elif ch in ' \n\r\t':
+                    pass
+                else:
+                    state = "seek_key"
+            elif state == "pre_value":
+                if ch == '"':
+                    state = "in_value"
+                elif ch in ' \n\r\t':
+                    pass
+                else:
+                    state = "seek_key"
+            elif state == "in_value":
+                if escape:
+                    if ch == 'n':
+                        scene_chars.append('\n')
+                    elif ch == 't':
+                        scene_chars.append('\t')
+                    elif ch == '"':
+                        scene_chars.append('"')
+                    elif ch == '\\':
+                        scene_chars.append('\\')
+                    else:
+                        scene_chars.append(ch)
+                    escape = False
+                    scene_updated = True
+                else:
+                    if ch == '\\':
+                        escape = True
+                    elif ch == '"':
+                        scene_done = True
+                        state = "seek_key"
+                    else:
+                        scene_chars.append(ch)
+                        scene_updated = True
+        if scene_updated:
+            story_ph.markdown(
+                f'<div class="story-window"><div class="storybox">{"".join(scene_chars)}</div></div>',
+                unsafe_allow_html=True,
+            )
+    raw_text = "".join(raw_chunks)
+    scene_text = "".join(scene_chars) or raw_text
     choice_objs: List = []
     try:
-        data = json.loads(raw_text)
-        scene_text = data.get("scene", raw_text)
+        m = re.search(r"\{[\s\S]*\}", raw_text)
+        data = json.loads(m.group(0) if m else raw_text)
+        scene_text = data.get("scene") or data.get("prose") or raw_text
+        choice_objs = data.get("choices") or []
+        if isinstance(choice_objs, str):
+            try:
+                choice_objs = json.loads(choice_objs)
+            except Exception:
+                choice_objs = [choice_objs]
         choice_objs = data.get("choices") or []
         items = data.get("items") or []
         if items:
