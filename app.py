@@ -21,7 +21,11 @@ from data.store import (
     has_snapshot, save_visit, save_event
 )
 
-from data.explore_store import delete_snapshot as delete_explore_snapshot
+from data.explore_store import (
+    delete_snapshot as delete_explore_snapshot,
+    load_snapshot as load_explore_snapshot,
+    init_db as init_explore_db,
+)
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -1852,9 +1856,22 @@ def render_explore(pid: str) -> None:
 
 def _explore_mode_enabled() -> bool:
     """Return True if exploration mode is requested."""
-    # Session state selection takes precedence
+    # Session state selection takes precedence; default "story_mode" is True so
+    # explicitly check for a saved exploration snapshot before defaulting.
     if "story_mode" in st.session_state:
-        return not st.session_state.get("story_mode", True)
+        if st.session_state.get("story_mode", True):
+            try:
+                pid = st.session_state.get("pid") or resolve_pid()
+                init_explore_db()
+                snap = load_explore_snapshot("world", pid)
+            except Exception:
+                snap = None
+            if snap:
+                st.session_state["story_mode"] = False
+                st.session_state["onboard_dismissed"] = True
+                return True
+            return False
+        return True
     # Fallback to query parameter or environment variable
     try:
         qp = st.query_params if hasattr(st, "query_params") else st.experimental_get_query_params()
@@ -1866,7 +1883,20 @@ def _explore_mode_enabled() -> bool:
     except Exception:
         pass
     env = _from_secrets_or_env("EXPLORE", "EXPLORE_MODE", "ENABLE_EXPLORE")
-    return _to_bool(env, default=False)
+    if _to_bool(env, default=False):
+        return True
+    # Last resort: restore from persisted exploration snapshot
+    try:
+        pid = st.session_state.get("pid") or resolve_pid()
+        init_explore_db()
+        snap = load_explore_snapshot("world", pid)
+        if snap:
+            st.session_state["story_mode"] = False
+            st.session_state["onboard_dismissed"] = True
+            return True
+    except Exception:
+        pass
+    return False
 
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, page_icon="🕯️", layout="wide")
