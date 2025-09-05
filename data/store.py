@@ -26,15 +26,12 @@ pickup_item = _sqlite_store.pickup_item
 drop_item = _sqlite_store.drop_item
 use_item = _sqlite_store.use_item
 get_romance_cooldown = _sqlite_store.get_romance_cooldown
+get_player_world_state = _sqlite_store.get_player_world_state
+get_location = _sqlite_store.get_location
+visible_interactables = _sqlite_store.visible_interactables
+move = _sqlite_store.move
+set_flag = _sqlite_store.set_flag
 _STORE_NAME = "sqlite"
-ensure_explore_schema = _sqlite_store.ensure_explore_schema
-seed_minimal_world = _sqlite_store.seed_minimal_world
-list_location_items = _sqlite_store.list_location_items
-list_player_inventory = _sqlite_store.list_player_inventory
-pickup_item = _sqlite_store.pickup_item
-drop_item = _sqlite_store.drop_item
-use_item = _sqlite_store.use_item
-get_romance_cooldown = _sqlite_store.get_romance_cooldown
 set_romance_cooldown = _sqlite_store.set_romance_cooldown
 
 # ---- Prefer Neon if DATABASE_URL is present and module imports cleanly

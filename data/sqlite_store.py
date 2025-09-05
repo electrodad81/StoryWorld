@@ -504,3 +504,259 @@ def set_romance_cooldown(player_id: str, npc_id: str, turns: int) -> None:
             (player_id, npc_id, turns),
         )
         conn.commit()
+
+        conn.commit()
+
+
+def get_player_world_state(player_id: str) -> dict:
+    """Return the player's world state, creating a default row if missing."""
+    with _connect() as conn, _DB_MUTEX:
+        _exec_retry(conn, "BEGIN IMMEDIATE;")
+        cur = _exec_retry(
+            conn,
+            "SELECT loc_id, flags, inventory, danger FROM player_world WHERE player_id=?",
+            (player_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            _exec_retry(
+                conn,
+                "INSERT INTO player_world(player_id, loc_id) VALUES (?, 'crossroads')",
+                (player_id,),
+            )
+            loc_id, flags_s, inv_s, danger = "crossroads", "[]", "{}", 0
+        else:
+            loc_id, flags_s, inv_s, danger = row
+        conn.commit()
+    try:
+        flags = json.loads(flags_s or "[]")
+    except Exception:
+        flags = []
+    try:
+        inventory = json.loads(inv_s or "{}")
+    except Exception:
+        inventory = {}
+    return {
+        "loc_id": loc_id,
+        "flags": flags,
+        "inventory": inventory,
+        "danger": int(danger),
+    }
+
+
+def get_location(loc_id: str) -> dict:
+    with _connect() as conn:
+        cur = _exec_retry(
+            conn, "SELECT id, name FROM world_locations WHERE id=?", (loc_id,)
+        )
+        row = cur.fetchone()
+    if not row:
+        return {"id": loc_id, "name": loc_id}
+    return {"id": row[0], "name": row[1]}
+
+
+def visible_interactables(loc_id: str):
+    """Return NPCs, objects, and exits visible from a location."""
+    with _connect() as conn:
+        cur = _exec_retry(
+            conn,
+            "SELECT id, name, traits, state FROM world_npcs WHERE loc_id=?",
+            (loc_id,),
+        )
+        npcs = [
+            {
+                "id": r[0],
+                "name": r[1],
+                "traits": json.loads(r[2] or "{}"),
+                "state": json.loads(r[3] or "{}"),
+            }
+            for r in cur.fetchall()
+        ]
+        cur = _exec_retry(
+            conn,
+            "SELECT id, name, state FROM world_objects WHERE loc_id=?",
+            (loc_id,),
+        )
+        objects = [
+            {
+                "id": r[0],
+                "name": r[1],
+                "state": json.loads(r[2] or "{}"),
+            }
+            for r in cur.fetchall()
+        ]
+        cur = _exec_retry(
+            conn,
+            "SELECT direction, dst_id, locked FROM world_exits WHERE src_id=?",
+            (loc_id,),
+        )
+        exits = [
+            {"direction": r[0], "dst_id": r[1], "locked": int(r[2])}
+            for r in cur.fetchall()
+        ]
+    return npcs, objects, exits
+
+
+def move(player_id: str, new_loc: str) -> None:
+    """Move the player to a new location."""
+    with _connect() as conn, _DB_MUTEX:
+        _exec_retry(conn, "BEGIN IMMEDIATE;")
+        _exec_retry(
+            conn,
+            "UPDATE player_world SET loc_id=? WHERE player_id=?",
+            (new_loc, player_id),
+        )
+        conn.commit()
+
+
+def set_flag(player_id: str, flag: str, value: bool) -> None:
+    """Set or clear a boolean flag on the player."""
+    with _connect() as conn, _DB_MUTEX:
+        _exec_retry(conn, "BEGIN IMMEDIATE;")
+        cur = _exec_retry(
+            conn, "SELECT flags FROM player_world WHERE player_id=?", (player_id,)
+        )
+        row = cur.fetchone()
+        flags = set()
+        if row:
+            try:
+                flags = set(json.loads(row[0] or "[]"))
+            except Exception:
+                flags = set()
+        if value:
+            flags.add(flag)
+        else:
+            flags.discard(flag)
+        _exec_retry(
+            conn,
+            "UPDATE player_world SET flags=? WHERE player_id=?",
+            (json.dumps(sorted(flags)), player_id),
+        )
+        conn.commit()
+
+
+def get_player_world_state(player_id: str) -> dict:
+    """Return the player's world state, creating a default row if missing."""
+    with _connect() as conn, _DB_MUTEX:
+        _exec_retry(conn, "BEGIN IMMEDIATE;")
+        cur = _exec_retry(
+            conn,
+            "SELECT loc_id, flags, inventory, danger FROM player_world WHERE player_id=?",
+            (player_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            _exec_retry(
+                conn,
+                "INSERT INTO player_world(player_id, loc_id) VALUES (?, 'crossroads')",
+                (player_id,),
+            )
+            loc_id, flags_s, inv_s, danger = "crossroads", "[]", "{}", 0
+        else:
+            loc_id, flags_s, inv_s, danger = row
+        conn.commit()
+    try:
+        flags = json.loads(flags_s or "[]")
+    except Exception:
+        flags = []
+    try:
+        inventory = json.loads(inv_s or "{}")
+    except Exception:
+        inventory = {}
+    return {
+        "loc_id": loc_id,
+        "flags": flags,
+        "inventory": inventory,
+        "danger": int(danger),
+    }
+
+
+def get_location(loc_id: str) -> dict:
+    with _connect() as conn:
+        cur = _exec_retry(
+            conn, "SELECT id, name FROM world_locations WHERE id=?", (loc_id,)
+        )
+        row = cur.fetchone()
+    if not row:
+        return {"id": loc_id, "name": loc_id}
+    return {"id": row[0], "name": row[1]}
+
+
+def visible_interactables(loc_id: str):
+    """Return NPCs, objects, and exits visible from a location."""
+    with _connect() as conn:
+        cur = _exec_retry(
+            conn,
+            "SELECT id, name, traits, state FROM world_npcs WHERE loc_id=?",
+            (loc_id,),
+        )
+        npcs = [
+            {
+                "id": r[0],
+                "name": r[1],
+                "traits": json.loads(r[2] or "{}"),
+                "state": json.loads(r[3] or "{}"),
+            }
+            for r in cur.fetchall()
+        ]
+        cur = _exec_retry(
+            conn,
+            "SELECT id, name, state FROM world_objects WHERE loc_id=?",
+            (loc_id,),
+        )
+        objects = [
+            {
+                "id": r[0],
+                "name": r[1],
+                "state": json.loads(r[2] or "{}"),
+            }
+            for r in cur.fetchall()
+        ]
+        cur = _exec_retry(
+            conn,
+            "SELECT direction, dst_id, locked FROM world_exits WHERE src_id=?",
+            (loc_id,),
+        )
+        exits = [
+            {"direction": r[0], "dst_id": r[1], "locked": int(r[2])}
+            for r in cur.fetchall()
+        ]
+    return npcs, objects, exits
+
+
+def move(player_id: str, new_loc: str) -> None:
+    """Move the player to a new location."""
+    with _connect() as conn, _DB_MUTEX:
+        _exec_retry(conn, "BEGIN IMMEDIATE;")
+        _exec_retry(
+            conn,
+            "UPDATE player_world SET loc_id=? WHERE player_id=?",
+            (new_loc, player_id),
+        )
+        conn.commit()
+
+
+def set_flag(player_id: str, flag: str, value: bool) -> None:
+    """Set or clear a boolean flag on the player."""
+    with _connect() as conn, _DB_MUTEX:
+        _exec_retry(conn, "BEGIN IMMEDIATE;")
+        cur = _exec_retry(
+            conn, "SELECT flags FROM player_world WHERE player_id=?", (player_id,)
+        )
+        row = cur.fetchone()
+        flags = set()
+        if row:
+            try:
+                flags = set(json.loads(row[0] or "[]"))
+            except Exception:
+                flags = set()
+        if value:
+            flags.add(flag)
+        else:
+            flags.discard(flag)
+        _exec_retry(
+            conn,
+            "UPDATE player_world SET flags=? WHERE player_id=?",
+            (json.dumps(sorted(flags)), player_id),
+        )
+        conn.commit()

@@ -11,6 +11,11 @@ import streamlit as st
 from ui.choices import render_choices_grid
 from story.engine import generate_illustration
 from story.explore_engine import apply_outcome, tick_render
+from data.explore_store import (
+    init_db as _init_db,
+    save_snapshot as _save_snapshot,
+    load_snapshot as _load_snapshot,
+)
 
 # -----------------------------------------------------------------------------
 # Lore / constants
@@ -18,7 +23,6 @@ from story.explore_engine import apply_outcome, tick_render
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LORE_PATH = ROOT / "lore.json"
 LORE = json.loads(LORE_PATH.read_text(encoding="utf-8")) if LORE_PATH.exists() else {}
-CHOICE_COUNT = 2
 
 _executor = ThreadPoolExecutor(max_workers=2)
 
@@ -118,20 +122,70 @@ def ensure_explore_keys() -> None:
     st.session_state.setdefault("onboard_dismissed", True)
     st.session_state.setdefault("explore_illustration_every", 3)
 
+def _maybe_restore_from_snapshot(pid: str) -> bool:
+    """Hydrate session_state from a persisted snapshot if empty."""
+    if st.session_state.get("scene") or st.session_state.get("choices"):
+        return False
+    try:
+        snap = _load_snapshot("world", pid)
+    except Exception:
+        snap = None
+    if not snap:
+        return False
+    st.session_state["scene"] = snap.get("scene") or ""
+    st.session_state["choices"] = snap.get("choices") or []
+    st.session_state["history"] = snap.get("history") or []
+    st.session_state["pending_choice"] = None
+    st.session_state["scene_count"] = snap.get("decisions_count", 0)
+    if not st.session_state.get("explore_illustration_url"):
+        _start_illustration_job(st.session_state["scene"])
+    return True
+
+
+def _render_sidebar(state: dict) -> None:
+    """Render map, inventory and NPC info in the sidebar."""
+    with st.sidebar:
+        st.markdown("### Map")
+        loc = state.get("location") or ""
+        exits = state.get("exits", []) or []
+        lines = [f"{e.get('direction')}→{e.get('dst_id')}" for e in exits]
+        st.write(loc)
+        if lines:
+            st.caption("exits: " + ", ".join(lines))
+
+        inv = state.get("inventory") or {}
+        if inv:
+            st.markdown("### Inventory")
+            for item_id, qty in inv.items():
+                st.write(f"{item_id} ×{qty}")
+
+        npcs = state.get("npcs") or []
+        if npcs:
+            st.markdown("### NPCs")
+            for npc in npcs:
+                name = npc.get("name") or npc.get("id")
+                cooldown = npc.get("cooldown")
+                if cooldown:
+                    st.write(f"{name} (CD {cooldown})")
+                else:
+                    st.write(name)
+
 # -----------------------------------------------------------------------------
 # Core loop
 # -----------------------------------------------------------------------------
 
-def _advance_turn(pid: str, story_ph, illus_ph, sep_ph, choices_ph) -> None:
-    choice = st.session_state.get("pending_choice", "__start__")
+def _advance_turn(pid: str, story_ph, illus_ph, sep_ph, choices_ph) -> dict:
+    choice_label = st.session_state.get("pending_choice", "__start__")
     st.session_state["pending_choice"] = None
+    choice_map = st.session_state.get("explore_choice_map", {})
+    choice_id = choice_map.get(choice_label, choice_label)
 
     st.session_state["t_scene_start"] = time.time()
     
     # Depending on whether the user made a choice we either apply the
     # outcome or simply render the current location.
-    if choice and choice != "__start__":
-        result = apply_outcome(pid, choice, ROOT)
+    if choice_label and choice_label != "__start__":
+        result = apply_outcome(pid, choice_id, ROOT)
     else:
         result = tick_render(pid, ROOT)
 
@@ -152,30 +206,50 @@ def _advance_turn(pid: str, story_ph, illus_ph, sep_ph, choices_ph) -> None:
         _render_illustration(illus_ph)
     _render_separator(sep_ph)
 
-    choices = result.get("choices", []) or []
-    st.session_state["choices"] = choices[:CHOICE_COUNT]
+    raw_choices = result.get("choices", []) or []
+    labels = []
+    choice_map = {}
+    for opt in raw_choices:
+        if isinstance(opt, dict):
+            cid = opt.get("id")
+            lab = opt.get("label") or cid
+            if lab:
+                labels.append(lab)
+                if cid:
+                    choice_map[lab] = cid
+        elif isinstance(opt, str):
+            labels.append(opt)
+            choice_map[opt] = opt
+    st.session_state["choices"] = labels
+    st.session_state["explore_choice_map"] = choice_map
     st.session_state["is_generating"] = False
     with choices_ph.container():
         st.markdown('<div class="story-body">', unsafe_allow_html=True)
         slot = st.container()
-        render_choices_grid(slot, choices=choices, generating=False, count=CHOICE_COUNT)
+        render_choices_grid(
+            slot, choices=labels, generating=False, count=max(1, len(labels))
+        )
     st.session_state["t_choices_visible_at"] = time.time()
+    _save_snapshot("world", pid, scene_text, raw_choices, st.session_state.get("history", []))
+    return result
 
 # -----------------------------------------------------------------------------
 # Public entry point
 # -----------------------------------------------------------------------------
 
 def render_explore(pid: str) -> None:
+    _init_db()
     ensure_explore_keys()
     st.session_state["story_mode"] = False
+    _maybe_restore_from_snapshot(pid)
 
     story_ph = st.empty()
     illus_ph = st.empty()
     sep_ph = st.empty()
     choices_ph = st.empty()
-
+    
     if st.session_state.get("pending_choice") is not None:
-        _advance_turn(pid, story_ph, illus_ph, sep_ph, choices_ph)
+        state = _advance_turn(pid, story_ph, illus_ph, sep_ph, choices_ph)
     else:
         story_html = st.session_state.get("scene", "")
         story_ph.markdown(
@@ -188,5 +262,12 @@ def render_explore(pid: str) -> None:
         with choices_ph.container():
             st.markdown('<div class="story-body">', unsafe_allow_html=True)
             slot = st.container()
-            render_choices_grid(slot, choices=current_choices, generating=False, count=CHOICE_COUNT)
+            render_choices_grid(
+                slot,
+                choices=current_choices,
+                generating=False,
+                count=max(1, len(current_choices)),
+            )
+        state = tick_render(pid, ROOT)
+    _render_sidebar(state)
     _poll_illustration()

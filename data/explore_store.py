@@ -23,12 +23,14 @@ from .explore_sqlite_store import (
     init_db as _init_db_sqlite,
     save_snapshot as _save_sqlite,
     load_snapshot as _load_sqlite,
+    delete_snapshot as _del_sqlite,
     save_event as _save_event_sqlite,
 )
 
 init_db = _init_db_sqlite
 save_snapshot = _save_sqlite
 load_snapshot = _load_sqlite
+delete_snapshot = _del_sqlite
 save_event = _save_event_sqlite
 
 # If DATABASE_URL is present attempt to switch to the Neon backend dynamically
@@ -38,6 +40,7 @@ if _DB_URL:
         init_db = neon.init_db  # type: ignore
         save_snapshot = neon.save_snapshot  # type: ignore
         load_snapshot = neon.load_snapshot  # type: ignore
+        delete_snapshot = neon.delete_snapshot  # type: ignore
         save_event = neon.save_event  # type: ignore
         _STORE_NAME = "neon"
     except Exception as e:
@@ -49,3 +52,12 @@ if _DB_URL:
 
 def store_name() -> str:
     return _STORE_NAME
+
+__all__ = [
+    "init_db",
+    "save_snapshot",
+    "load_snapshot",
+    "delete_snapshot",
+    "save_event",
+    "store_name",
+]

@@ -21,6 +21,8 @@ from data.store import (
     has_snapshot, save_visit, save_event
 )
 
+from data.explore_store import delete_snapshot as delete_explore_snapshot
+
 from concurrent.futures import ThreadPoolExecutor
 
 def _should_illustrate(scene_index: int) -> bool:
@@ -108,6 +110,10 @@ def hard_reset_app(pid: str):
     # 1) drop persisted snapshot
     try:
         delete_snapshot(pid)
+    except Exception:
+        pass
+    try:
+        delete_explore_snapshot("world", pid)
     except Exception:
         pass
 
@@ -827,6 +833,8 @@ def render_death_options(pid: str, slot) -> None:
                 st.session_state.pop(k, None)
             try: delete_snapshot(pid)
             except Exception: pass
+            try: delete_explore_snapshot("world", pid)
+            except Exception: pass
             if st.session_state.get("story_mode"):
                 st.session_state["beat_index"] = 0
                 st.session_state["story_complete"] = False
@@ -850,6 +858,8 @@ def render_end_options(pid: str, slot) -> None:
                       "t_choices_visible_at","t_scene_start","is_dead","beat_index","story_complete"):
                 st.session_state.pop(k, None)
             try: delete_snapshot(pid)
+            except Exception: pass
+            try: delete_explore_snapshot("world", pid)
             except Exception: pass
             if st.session_state.get("story_mode"):
                 st.session_state["beat_index"] = 0
@@ -1587,6 +1597,7 @@ def render_story(pid: str) -> None:
                 if c3.button("Delete snapshot", key="dev_delete_snapshot"):
                     try:
                         delete_snapshot(pid)
+                        delete_explore_snapshot("world", pid)
                         st.warning("Snapshot deleted.")
                     except Exception as e:
                         st.error(f"Delete failed: {e}")
@@ -1616,9 +1627,13 @@ def render_story(pid: str) -> None:
                 
     # Sidebar actions
     if action == "start":
-        try: 
+        try:
             delete_snapshot(pid)
-        except Exception: 
+        except Exception:
+            pass
+        try:
+            delete_explore_snapshot("world", pid)
+        except Exception:
             pass
 
         # nuke illustration & recap caches so nothing carries over
@@ -1775,6 +1790,10 @@ def render_explore(pid: str) -> None:
     if action == "start":
         try:
             delete_snapshot(pid)
+        except Exception:
+            pass
+        try:
+            delete_explore_snapshot("world", pid)
         except Exception:
             pass
         for k in (

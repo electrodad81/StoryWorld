@@ -7,6 +7,20 @@ from contextlib import contextmanager
 BASE_DIR = Path(__file__).resolve().parents[1]
 DB_PATH = str(BASE_DIR / "story.db")
 
+__all__ = [
+    "init_db",
+    "save_event",
+    "save_snapshot",
+    "load_snapshot",
+    "delete_snapshot",
+]
+
+# Maps snapshot kinds to their backing tables
+_SNAPSHOT_TABLES = {
+    "world": "world_progress",
+    "romance": "romance_progress",
+}
+
 @contextmanager
 def _connect():
     conn = sqlite3.connect(DB_PATH)
@@ -141,3 +155,10 @@ def load_snapshot(kind: str, user_id: str):
             "history": history,
             "decisions_count": decisions_count,
         }
+
+
+def delete_snapshot(kind: str, user_id: str) -> None:
+    table = _table(kind)
+    with _connect() as conn:
+        conn.execute(f"DELETE FROM {table} WHERE user_id=?", (user_id,))
+        conn.commit()

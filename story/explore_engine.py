@@ -65,13 +65,20 @@ def tick_render(player_id: str, repo: Path | str) -> Dict[str, Any]:
     codebase where location data may be read from disk.
     """
 
-    # Pull state from the persistence layer.  Each ``load_*`` helper is
-    # optional; the store decides how much information it can provide.
-    location = _call_store("load_location", player_id) or {}
-    exits = _call_store("load_exits", player_id) or []
-    npcs = _call_store("load_npcs", player_id) or []
-    objects = _call_store("load_objects", player_id) or []
-    items = _call_store("load_items", player_id) or []
+    # Pull state from the persistence layer.  Each helper is optional; the
+    # store decides how much information it can provide.
+    player = _call_store("get_player_world_state", player_id) or {}
+    loc_id = player.get("loc_id")
+    location = _call_store("get_location", loc_id) or {"id": loc_id}
+    npcs, objects, exits = _call_store("visible_interactables", loc_id) or ([], [], [])
+    items = _call_store("list_location_items", loc_id) or []
+    # Use the inventory already contained in the player state rather than
+    # hitting the store again. Some store implementations may have side
+    # effects when listing the player's inventory which could cause items to
+    # appear without an explicit pickup action. By relying on the copy from
+    # ``get_player_world_state`` we guarantee that merely rendering a scene is
+    # read-only.
+    inventory = dict(player.get("inventory") or {})
 
     # Basic prose/choice extraction.  Location dictionaries in the real
     # game contain rich metadata; here we only use a couple of common
@@ -79,17 +86,46 @@ def tick_render(player_id: str, repo: Path | str) -> Dict[str, Any]:
     prose = location.get("description", "")
     map_hint = location.get("map_hint")
 
-    # Choices may come precomputed from the store.  If not, we fall back
-    # to generating them from exits.  Each exit is expected to have a
-    # ``choice`` field describing the action.
-    raw_choices = location.get("choices") or exits
+    # Assemble dynamic choices from exits, NPCs, objects, and items.
     choices = []
-    for opt in raw_choices:
-        if isinstance(opt, str):
-            choices.append(opt)
-        elif isinstance(opt, dict):
-            # Common keys: ``choice`` or ``label``
-            choices.append(opt.get("choice") or opt.get("label") or "")
+    dir_names = {"N": "north", "S": "south", "E": "east", "W": "west"}
+    for ex in exits:
+        if ex.get("locked"):
+            continue
+        direction = ex.get("direction")
+        if direction:
+            name = dir_names.get(direction, direction)
+            choices.append({
+                "id": f"move:{direction}",
+                "label": f"Go {name}",
+            })
+    for npc in npcs:
+        npc_id = npc.get("id")
+        name = npc.get("name") or npc_id
+        if npc_id:
+            choices.append({
+                "id": f"talk:npc:{npc_id}",
+                "label": f"Talk to {name}",
+            })
+    for obj in objects:
+        obj_id = obj.get("id")
+        name = obj.get("name") or obj_id
+        if obj_id:
+            choices.append({
+                "id": f"investigate:obj:{obj_id}",
+                "label": f"Investigate {name}",
+            })
+    for item in items:
+        item_id = item.get("id")
+        name = item.get("name") or item_id
+        if item_id:
+            choices.append({
+                "id": f"pickup:item:{item_id}",
+                "label": f"Pick up {name}",
+            })
+    for inv_id in inventory.keys():
+        choices.append({"id": f"use:item:{inv_id}", "label": f"Use {inv_id}"})
+        choices.append({"id": f"drop:item:{inv_id}", "label": f"Drop {inv_id}"})
 
     return {
         "location": location.get("id"),
@@ -100,33 +136,51 @@ def tick_render(player_id: str, repo: Path | str) -> Dict[str, Any]:
         "npcs": npcs,
         "objects": objects,
         "items": items,
+        "inventory": inventory,
     }
 
 
 def apply_outcome(player_id: str, choice: Any, repo: Path | str) -> Dict[str, Any]:
-    """Apply the result of a player's choice.
+    """Apply the result of a player's choice."""
 
-    ``choice`` is expected to be a structure (often a dict) containing
-    any of the following keys:
-
-    - ``pickup`` / ``drop`` / ``use`` : items to modify in the player's
-      inventory.
-    - ``flags`` : mapping of flag names to boolean values.
-    - ``move`` : new location identifier.
-    - ``romance_cooldown`` : mapping of NPC identifiers to cooldown
-      timestamps.
-
-    After mutating the store the function delegates to :func:`tick_render`
-    to produce the updated view of the world.
-    """
+    if isinstance(choice, str):
+        action = choice
+        player = _call_store("get_player_world_state", player_id) or {}
+        loc_id = player.get("loc_id")
+        if action.startswith("move:"):
+            direction = action.split(":", 1)[1]
+            _, _, exits = _call_store("visible_interactables", loc_id) or ([], [], [])
+            for ex in exits:
+                if ex.get("direction") == direction and not ex.get("locked"):
+                    _call_store("move", player_id, ex.get("dst_id"))
+                    break
+        elif action.startswith("talk:npc:"):
+            pass  # talking has no mechanical effect yet
+        elif action.startswith("pickup:item:"):
+            item_id = action.split(":")[-1]
+            _call_store("pickup_item", player_id, loc_id, item_id, 1)
+        elif action.startswith("drop:item:"):
+            item_id = action.split(":")[-1]
+            _call_store("drop_item", player_id, loc_id, item_id, 1)
+        elif action.startswith("use:item:"):
+            item_id = action.split(":")[-1]
+            _call_store("use_item", player_id, item_id)
+        elif action.startswith("investigate:obj:"):
+            obj_id = action.split(":")[-1]
+            _call_store("set_flag", player_id, f"seen:{obj_id}", True)
+        return tick_render(player_id, repo)
 
     data = choice if isinstance(choice, dict) else {}
 
     # Inventory changes --------------------------------------------------
-    for item in _ensure_iter(data.get("pickup")):
-        _call_store("pickup_item", player_id, item)
-    for item in _ensure_iter(data.get("drop")):
-        _call_store("drop_item", player_id, item)
+    player = _call_store("get_player_world_state", player_id) or {}
+    loc_id = player.get("loc_id")
+    inv_delta = data.get("inventory_delta") or {}
+    for item_id, delta in inv_delta.items():
+        if delta > 0:
+            _call_store("pickup_item", player_id, loc_id, item_id, delta)
+        elif delta < 0:
+            _call_store("drop_item", player_id, loc_id, item_id, -delta)
     for item in _ensure_iter(data.get("use")):
         _call_store("use_item", player_id, item)
 
@@ -136,8 +190,9 @@ def apply_outcome(player_id: str, choice: Any, repo: Path | str) -> Dict[str, An
         _call_store("set_flag", player_id, flag, value)
 
     # Movement -----------------------------------------------------------
-    if data.get("move") is not None:
-        _call_store("move", player_id, data.get("move"))
+    new_loc = data.get("player_loc") or data.get("move")
+    if new_loc is not None:
+        _call_store("move", player_id, new_loc)
 
     # Romance cooldowns --------------------------------------------------
     rc = data.get("romance_cooldown") or {}

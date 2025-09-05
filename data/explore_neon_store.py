@@ -6,6 +6,13 @@ from psycopg2.extras import register_default_jsonb
 from contextlib import contextmanager
 
 
+__all__ = [
+    "init_db",
+    "save_event",
+    "save_snapshot",
+    "load_snapshot",
+    "delete_snapshot",
+]
 def _db_url() -> str:
     url = os.getenv("DATABASE_URL") or (st.secrets.get("DATABASE_URL") if hasattr(st, "secrets") else None)
     if not url:
@@ -134,3 +141,9 @@ def load_snapshot(kind: str, user_id: str):
             "history": history,
             "decisions_count": decisions_count,
         }
+
+def delete_snapshot(kind: str, user_id: str) -> None:
+    table = _table(kind)
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute(f"DELETE FROM {table} WHERE user_id=%s", (user_id,))
+        conn.commit()
