@@ -23,7 +23,11 @@ import streamlit as st
 from ui.choices import render_choices_grid
 from story.engine import generate_illustration, client
 from explore.prompts import SCENE_SYSTEM_PROMPT, CHOICE_SYSTEM_PROMPT
-
+from data.explore_store import (
+    init_db as _init_db,
+    save_snapshot as _save_snapshot,
+    load_snapshot as _load_snapshot,
+)
 
 # ---------------------------------------------------------------------------
 # Lore / constants
@@ -304,6 +308,65 @@ def _update_world_state(scene_text: str, choices: List, picked: Optional[str]) -
         inv.append(f"Relic {len(visited)}")
     st.session_state["inventory"] = inv
 
+def _rehydrate_world_state(history: List[Dict[str, str]], choices: List) -> None:
+    """Reconstruct lightweight world state from history and current choices."""
+    pos = (0, 0)
+    visited: Dict[Tuple[int, int], bool] = {(0, 0): True}
+    inv: List[str] = []
+    for msg in history:
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            dx, dy = _dir_to_delta(msg.get("content", ""))
+            pos = (pos[0] + dx, pos[1] + dy)
+            visited[pos] = True
+            if len(visited) % 3 == 0:
+                relic = f"Relic {len(visited)}"
+                if relic not in inv:
+                    inv.append(relic)
+    st.session_state["pos"] = pos
+    st.session_state["visited"] = visited
+    st.session_state["current_location"] = f"{pos[0]},{pos[1]}"
+    exits: List[str] = []
+    for c in choices:
+        label = c.get("id") if isinstance(c, dict) else str(c)
+        if _dir_to_delta(label) != (0, 0):
+            exits.append(label)
+    st.session_state["current_exits"] = exits
+    st.session_state["visible_npcs"] = [
+        {"name": f"NPC {len(visited)}", "romance": min(100, len(visited) * 5)}
+    ]
+    st.session_state["inventory"] = inv
+
+
+def _maybe_restore_from_snapshot(pid: str) -> bool:
+    """Hydrate session state from a persisted snapshot if empty."""
+    if st.session_state.get("scene") or st.session_state.get("choices"):
+        return False
+    try:
+        snap = _load_snapshot("world", pid)
+    except Exception:
+        snap = None
+    if not snap:
+        return False
+    st.session_state["scene"] = snap.get("scene") or ""
+    raw_choices = snap.get("choices") or []
+    st.session_state["history"] = snap.get("history") or []
+    st.session_state["pending_choice"] = None
+    st.session_state["scene_count"] = snap.get("decisions_count", 0)
+    st.session_state["choice_objs"] = raw_choices
+    if raw_choices and isinstance(raw_choices[0], dict):
+        labels = [c.get("label", "") for c in raw_choices]
+        st.session_state["choice_map"] = {
+            c.get("label", ""): c.get("id", c.get("label", "")) for c in raw_choices
+        }
+    else:
+        labels = [str(c) for c in raw_choices]
+        st.session_state["choice_map"] = {lbl: lbl for lbl in labels}
+    st.session_state["choices"] = labels[:CHOICE_COUNT]
+    _rehydrate_world_state(st.session_state["history"], raw_choices)
+    if not st.session_state.get("explore_illustration_url"):
+        _start_illustration_job(st.session_state["scene"])
+    return True
+
 
 def _render_sidebar_state() -> None:
     with st.sidebar.expander("Map", expanded=True):
@@ -337,7 +400,7 @@ def _render_sidebar_state() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _advance_turn(story_ph, illus_ph, sep_ph, choices_ph) -> None:
+def _advance_turn(pid: str, story_ph, illus_ph, sep_ph, choices_ph) -> None:
     choice_label = st.session_state.get("pending_choice", "__start__")
     st.session_state["pending_choice"] = None
     choice_map = st.session_state.get("choice_map", {})
@@ -473,7 +536,13 @@ def _advance_turn(story_ph, illus_ph, sep_ph, choices_ph) -> None:
         )
     st.session_state["t_choices_visible_at"] = time.time()
     _update_world_state(scene_text, choice_objs, choice)
-
+    _save_snapshot(
+        "world",
+        pid,
+        scene_text,
+        choice_objs,
+        st.session_state.get("history", []),
+    )
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -481,8 +550,10 @@ def _advance_turn(story_ph, illus_ph, sep_ph, choices_ph) -> None:
 
 
 def render_explore(pid: str) -> None:
+    _init_db()
     ensure_explore_keys()
     st.session_state["story_mode"] = False
+    _maybe_restore_from_snapshot(pid)
 
     story_ph = st.empty()
     illus_ph = st.empty()
@@ -490,7 +561,7 @@ def render_explore(pid: str) -> None:
     choices_ph = st.empty()
 
     if st.session_state.get("pending_choice") is not None:
-        _advance_turn(story_ph, illus_ph, sep_ph, choices_ph)
+        _advance_turn(pid, story_ph, illus_ph, sep_ph, choices_ph)
     else:
         story_html = st.session_state.get("scene", "")
         story_ph.markdown(
