@@ -2,6 +2,7 @@
 import os, time, json, hashlib, re, pathlib, math
 from typing import Optional, Set, Tuple
 import streamlit as st
+from streamlit.runtime.scriptrunner import StopException, RerunException
 
 import uuid
 
@@ -185,7 +186,10 @@ def resolve_pid() -> str:
     # 2) From localStorage (component may not be ready on first render in hosted envs)
     pid = None
     try:
-        pid = ensure_browser_id()  # returns brw-... when ready; may be None on first paint
+        pid = ensure_browser_id()  # returns brw-... when ready; may raise StopException
+    except (StopException, RerunException):
+        # Propagate Streamlit's control-flow exceptions for proper rerun behavior
+        raise
     except Exception:
         pid = None
 
@@ -257,6 +261,81 @@ def _maybe_restore_from_snapshot(pid: str) -> bool:
         if k in snap and snap[k] is not None:
             st.session_state[k] = snap[k]
 
+    return True
+
+def _maybe_restore_explore_snapshot(pid: str) -> bool:
+    """
+    Restore exploration mode session state from a persisted snapshot if memory
+    is empty. Mirrors :func:`_maybe_restore_from_snapshot` but uses the
+    exploration snapshot store and adapts to the exploration engines.
+    """
+
+    if st.session_state.get("is_generating") or st.session_state.get("pending_choice"):
+        return False
+    if st.session_state.get("scene") or st.session_state.get("history"):
+        return False
+
+    if EXPLORE_V2:
+        from explore_v2.engine import (
+            ensure_explore_keys,
+            _start_illustration_job,
+            CHOICE_COUNT as _EXP_V2_CC,
+        )
+    else:
+        from explore.engine import ensure_explore_keys, _start_illustration_job
+
+    ensure_explore_keys()
+
+    try:
+        snap = load_explore_snapshot("world", pid)
+    except Exception:
+        snap = None
+    if not snap:
+        return False
+
+    if EXPLORE_V2:
+        st.session_state["scene"] = snap.get("scene") or ""
+        raw = snap.get("choices") or []
+        st.session_state["history"] = snap.get("history") or []
+        st.session_state["pending_choice"] = None
+        st.session_state["scene_count"] = snap.get("decisions_count", 0)
+        st.session_state["choice_objs"] = raw
+        if raw and isinstance(raw[0], dict):
+            labels = [c.get("label", "") for c in raw]
+            st.session_state["choice_map"] = {
+                c.get("label", ""): c.get("id", c.get("label", "")) for c in raw
+            }
+        else:
+            labels = [str(c) for c in raw]
+            st.session_state["choice_map"] = {lbl: lbl for lbl in labels}
+        st.session_state["choices"] = labels[:_EXP_V2_CC]
+        if not st.session_state.get("explore_illustration_url"):
+            _start_illustration_job(st.session_state["scene"])
+    else:
+        st.session_state["scene"] = snap.get("scene") or ""
+        raw = snap.get("choices") or []
+        st.session_state["history"] = snap.get("history") or []
+        st.session_state["pending_choice"] = None
+        st.session_state["scene_count"] = snap.get("decisions_count", 0)
+        labels = []
+        cmap = {}
+        for opt in raw:
+            if isinstance(opt, dict):
+                cid = opt.get("id")
+                lab = opt.get("label") or cid
+                if lab:
+                    labels.append(lab)
+                    if cid:
+                        cmap[lab] = cid
+            elif isinstance(opt, str):
+                labels.append(opt)
+                cmap[opt] = opt
+        st.session_state["choices"] = labels
+        st.session_state["explore_choice_map"] = cmap
+        if not st.session_state.get("explore_illustration_url"):
+            _start_illustration_job(st.session_state["scene"])
+
+    st.session_state["is_generating"] = False
     return True
 
 # =============================================================================
@@ -1774,6 +1853,10 @@ def render_story(pid: str) -> None:
     
 def render_explore(pid: str) -> None:
     """Render exploration mode via the exploration modules."""
+    init_explore_db()
+    _maybe_restore_explore_snapshot(pid)
+    st.session_state["story_mode"] = False
+
     from explore.engine import render_explore as _render
     if EXPLORE_V2:
         from explore_v2.engine import render_explore as _render

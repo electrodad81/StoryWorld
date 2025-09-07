@@ -1,10 +1,13 @@
 # data/store.py
 from __future__ import annotations
 import os, importlib, logging
-import streamlit as st
 
-# Prefer secrets, fall back to env
-_DB_URL = os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL")
+try:  # Streamlit secrets are optional outside of the app runtime
+    import streamlit as st
+    _DB_URL = os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL")
+except Exception:
+    st = None  # type: ignore
+    _DB_URL = os.getenv("DATABASE_URL")
 _STORE_NAME = "sqlite"
 
 # ---- Default to SQLite (and export helpers)
@@ -33,6 +36,12 @@ move = _sqlite_store.move
 set_flag = _sqlite_store.set_flag
 _STORE_NAME = "sqlite"
 set_romance_cooldown = _sqlite_store.set_romance_cooldown
+get_player_world_state = _sqlite_store.get_player_world_state
+get_location = _sqlite_store.get_location
+visible_interactables = _sqlite_store.visible_interactables
+move = _sqlite_store.move
+set_flag = _sqlite_store.set_flag
+_STORE_NAME = "sqlite"
 
 # ---- Prefer Neon if DATABASE_URL is present and module imports cleanly
 if _DB_URL:
@@ -45,6 +54,20 @@ if _DB_URL:
         has_snapshot = neon.has_snapshot
         save_visit = neon.save_visit
         save_event = neon.save_event
+        ensure_explore_schema = getattr(neon, "ensure_explore_schema", ensure_explore_schema)
+        seed_minimal_world = getattr(neon, "seed_minimal_world", seed_minimal_world)
+        list_location_items = getattr(neon, "list_location_items", list_location_items)
+        list_player_inventory = getattr(neon, "list_player_inventory", list_player_inventory)
+        pickup_item = getattr(neon, "pickup_item", pickup_item)
+        drop_item = getattr(neon, "drop_item", drop_item)
+        use_item = getattr(neon, "use_item", use_item)
+        get_romance_cooldown = getattr(neon, "get_romance_cooldown", get_romance_cooldown)
+        set_romance_cooldown = getattr(neon, "set_romance_cooldown", set_romance_cooldown)
+        get_player_world_state = getattr(neon, "get_player_world_state", get_player_world_state)
+        get_location = getattr(neon, "get_location", get_location)
+        visible_interactables = getattr(neon, "visible_interactables", visible_interactables)
+        move = getattr(neon, "move", move)
+        set_flag = getattr(neon, "set_flag", set_flag)
         _STORE_NAME = "neon"
     except Exception as e:
         logging.warning(

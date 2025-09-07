@@ -24,7 +24,6 @@ from ui.choices import render_choices_grid
 from story.engine import generate_illustration, client
 from explore.prompts import SCENE_SYSTEM_PROMPT, CHOICE_SYSTEM_PROMPT
 from data.explore_store import (
-    init_db as _init_db,
     save_snapshot as _save_snapshot,
     load_snapshot as _load_snapshot,
 )
@@ -550,10 +549,7 @@ def _advance_turn(pid: str, story_ph, illus_ph, sep_ph, choices_ph) -> None:
 
 
 def render_explore(pid: str) -> None:
-    _init_db()
-    ensure_explore_keys()
     st.session_state["story_mode"] = False
-    _maybe_restore_from_snapshot(pid)
 
     story_ph = st.empty()
     illus_ph = st.empty()

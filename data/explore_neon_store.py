@@ -13,6 +13,7 @@ __all__ = [
     "load_snapshot",
     "delete_snapshot",
 ]
+
 def _db_url() -> str:
     url = os.getenv("DATABASE_URL") or (st.secrets.get("DATABASE_URL") if hasattr(st, "secrets") else None)
     if not url:
