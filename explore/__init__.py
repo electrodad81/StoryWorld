@@ -1,4 +1,4 @@
-"""Exploration mode public API."""
+"""Exploration mode package."""
 
 from .engine import render_explore
 

@@ -22,12 +22,6 @@ from data.store import (
     has_snapshot, save_visit, save_event
 )
 
-from data.explore_store import (
-    delete_snapshot as delete_explore_snapshot,
-    load_snapshot as load_explore_snapshot,
-    init_db as init_explore_db,
-)
-
 from concurrent.futures import ThreadPoolExecutor
 
 def _should_illustrate(scene_index: int) -> bool:
@@ -115,10 +109,6 @@ def hard_reset_app(pid: str):
     # 1) drop persisted snapshot
     try:
         delete_snapshot(pid)
-    except Exception:
-        pass
-    try:
-        delete_explore_snapshot("world", pid)
     except Exception:
         pass
 
@@ -261,81 +251,6 @@ def _maybe_restore_from_snapshot(pid: str) -> bool:
         if k in snap and snap[k] is not None:
             st.session_state[k] = snap[k]
 
-    return True
-
-def _maybe_restore_explore_snapshot(pid: str) -> bool:
-    """
-    Restore exploration mode session state from a persisted snapshot if memory
-    is empty. Mirrors :func:`_maybe_restore_from_snapshot` but uses the
-    exploration snapshot store and adapts to the exploration engines.
-    """
-
-    if st.session_state.get("is_generating") or st.session_state.get("pending_choice"):
-        return False
-    if st.session_state.get("scene") or st.session_state.get("history"):
-        return False
-
-    if EXPLORE_V2:
-        from explore_v2.engine import (
-            ensure_explore_keys,
-            _start_illustration_job,
-            CHOICE_COUNT as _EXP_V2_CC,
-        )
-    else:
-        from explore.engine import ensure_explore_keys, _start_illustration_job
-
-    ensure_explore_keys()
-
-    try:
-        snap = load_explore_snapshot("world", pid)
-    except Exception:
-        snap = None
-    if not snap:
-        return False
-
-    if EXPLORE_V2:
-        st.session_state["scene"] = snap.get("scene") or ""
-        raw = snap.get("choices") or []
-        st.session_state["history"] = snap.get("history") or []
-        st.session_state["pending_choice"] = None
-        st.session_state["scene_count"] = snap.get("decisions_count", 0)
-        st.session_state["choice_objs"] = raw
-        if raw and isinstance(raw[0], dict):
-            labels = [c.get("label", "") for c in raw]
-            st.session_state["choice_map"] = {
-                c.get("label", ""): c.get("id", c.get("label", "")) for c in raw
-            }
-        else:
-            labels = [str(c) for c in raw]
-            st.session_state["choice_map"] = {lbl: lbl for lbl in labels}
-        st.session_state["choices"] = labels[:_EXP_V2_CC]
-        if not st.session_state.get("explore_illustration_url"):
-            _start_illustration_job(st.session_state["scene"])
-    else:
-        st.session_state["scene"] = snap.get("scene") or ""
-        raw = snap.get("choices") or []
-        st.session_state["history"] = snap.get("history") or []
-        st.session_state["pending_choice"] = None
-        st.session_state["scene_count"] = snap.get("decisions_count", 0)
-        labels = []
-        cmap = {}
-        for opt in raw:
-            if isinstance(opt, dict):
-                cid = opt.get("id")
-                lab = opt.get("label") or cid
-                if lab:
-                    labels.append(lab)
-                    if cid:
-                        cmap[lab] = cid
-            elif isinstance(opt, str):
-                labels.append(opt)
-                cmap[opt] = opt
-        st.session_state["choices"] = labels
-        st.session_state["explore_choice_map"] = cmap
-        if not st.session_state.get("explore_illustration_url"):
-            _start_illustration_job(st.session_state["scene"])
-
-    st.session_state["is_generating"] = False
     return True
 
 # =============================================================================
@@ -774,7 +689,6 @@ LORE = json.loads(LORE_PATH.read_text(encoding="utf-8")) if LORE_PATH.exists() e
 
 CHOICE_COUNT = 2
 APP_TITLE = "Gloamreach"
-EXPLORE_V2 = st.secrets.get("EXPLORE_V2", True)
 
 # illustrate scenes 1,4,7,...
 ILLUSTRATION_EVERY_N = 3
@@ -916,8 +830,6 @@ def render_death_options(pid: str, slot) -> None:
                 st.session_state.pop(k, None)
             try: delete_snapshot(pid)
             except Exception: pass
-            try: delete_explore_snapshot("world", pid)
-            except Exception: pass
             if st.session_state.get("story_mode"):
                 st.session_state["beat_index"] = 0
                 st.session_state["story_complete"] = False
@@ -941,8 +853,6 @@ def render_end_options(pid: str, slot) -> None:
                       "t_choices_visible_at","t_scene_start","is_dead","beat_index","story_complete"):
                 st.session_state.pop(k, None)
             try: delete_snapshot(pid)
-            except Exception: pass
-            try: delete_explore_snapshot("world", pid)
             except Exception: pass
             if st.session_state.get("story_mode"):
                 st.session_state["beat_index"] = 0
@@ -1444,16 +1354,6 @@ def onboarding(pid: str):
         )
         st.caption("🔒 Archetypes coming soon.")
 
-        # Allow testers to toggle between story and exploration modes
-        mode = st.radio(
-            "Mode",
-            options=["Story Mode", "Exploration Mode"],
-            index=0,
-            help="Story Mode follows a guided narrative. Exploration Mode is free-roam.",
-        )
-        if mode == "Exploration Mode":
-            st.caption("⚠️ Exploration Mode is experimental.")
-
         c1, c2 = st.columns(2)
         begin = c1.button(
             "Begin Adventure",
@@ -1468,7 +1368,7 @@ def onboarding(pid: str):
             st.session_state["player_name"]=name.strip()
             st.session_state["player_gender"]=gender
             st.session_state["player_archetype"]=archetype
-            st.session_state["story_mode"]       = (mode == "Story Mode")
+            st.session_state["story_mode"]       = True
             st.session_state["beat_index"]=0
             st.session_state["story_complete"]=False
 
@@ -1680,7 +1580,6 @@ def render_story(pid: str) -> None:
                 if c3.button("Delete snapshot", key="dev_delete_snapshot"):
                     try:
                         delete_snapshot(pid)
-                        delete_explore_snapshot("world", pid)
                         st.warning("Snapshot deleted.")
                     except Exception as e:
                         st.error(f"Delete failed: {e}")
@@ -1712,10 +1611,6 @@ def render_story(pid: str) -> None:
     if action == "start":
         try:
             delete_snapshot(pid)
-        except Exception:
-            pass
-        try:
-            delete_explore_snapshot("world", pid)
         except Exception:
             pass
 
@@ -1850,147 +1745,14 @@ def render_story(pid: str) -> None:
         choices_ph.markdown(recap_html, unsafe_allow_html=True)
         st.session_state["t_choices_visible_at"] = None
         return
-    
-def render_explore(pid: str) -> None:
-    """Render exploration mode via the exploration modules."""
-    init_explore_db()
-    _maybe_restore_explore_snapshot(pid)
-    st.session_state["story_mode"] = False
-
-    from explore.engine import render_explore as _render
-    if EXPLORE_V2:
-        from explore_v2.engine import render_explore as _render
-    else:
-        from explore.engine import render_explore as _render
-
-    # Sidebar controls (start/reset) just like story mode
-    try:
-        action = sidebar_controls(pid)
-    except Exception:
-        action = None
-
-    # Exploration skips onboarding, so make sure it's hidden and keep a sidebar
-    # with developer tools just like story mode.
-    st.session_state["onboard_dismissed"] = True
-
-    # Handle sidebar actions
-    if action == "start":
-        try:
-            delete_snapshot(pid)
-        except Exception:
-            pass
-        try:
-            delete_explore_snapshot("world", pid)
-        except Exception:
-            pass
-        for k in (
-            "scene",
-            "choices",
-            "history",
-            "pending_choice",
-            "is_generating",
-            "t_choices_visible_at",
-            "t_scene_start",
-            "explore_ill_future",
-            "explore_illustration_url",
-            "explore_poll_count",
-            "scene_count",
-            "is_dead",
-            "__recap_html",
-        ):
-            st.session_state.pop(k, None)
-        st.session_state["run_seed"] = uuid.uuid4().hex
-        st.session_state["pending_choice"] = "__start__"
-        st.session_state["is_generating"] = True
-        st.session_state["scene_count"] = 0
-        st.session_state["story_mode"] = False
-        _soft_rerun()
-    elif action == "reset":
-        hard_reset_app(pid)
-
-    with st.sidebar:
-        if DEV_UI_ALLOWED:
-            st.session_state["_dev"] = st.checkbox(
-                "Developer tools",
-                value=bool(st.session_state.get("_dev", False)),
-                help="Show debug info & self-tests",
-                key="dev_toggle",
-            )
-        else:
-            st.session_state["_dev"] = False
-        if st.session_state.get("_dev"):
-            try:
-                if EXPLORE_V2:
-                    from explore_v2.devtools import render_debug_sidebar
-                    render_debug_sidebar(pid)
-                else:
-                    st.write("Exploration debug")
-                    st.json(
-                        {
-                            "pending_choice": st.session_state.get("pending_choice"),
-                            "scene_count": st.session_state.get("scene_count"),
-                            "polls": st.session_state.get("explore_poll_count"),
-                        }
-                    )
-            except Exception as exc:
-                st.warning(f"Dev tools unavailable: {exc}")
-
-    _render(pid)
-
-def _explore_mode_enabled() -> bool:
-    """Return True if exploration mode is requested."""
-    # Session state selection takes precedence; default "story_mode" is True so
-    # explicitly check for a saved exploration snapshot before defaulting.
-    if "story_mode" in st.session_state:
-        if st.session_state.get("story_mode", True):
-            try:
-                pid = st.session_state.get("pid") or resolve_pid()
-                init_explore_db()
-                snap = load_explore_snapshot("world", pid)
-            except Exception:
-                snap = None
-            if snap:
-                st.session_state["story_mode"] = False
-                st.session_state["onboard_dismissed"] = True
-                return True
-            return False
-        return True
-    # Fallback to query parameter or environment variable
-    try:
-        qp = st.query_params if hasattr(st, "query_params") else st.experimental_get_query_params()
-        flag = qp.get("explore")
-        if isinstance(flag, list):
-            flag = flag[0]
-        if flag is not None:
-            return _to_bool(flag, default=False)
-    except Exception:
-        pass
-    env = _from_secrets_or_env("EXPLORE", "EXPLORE_MODE", "ENABLE_EXPLORE")
-    if _to_bool(env, default=False):
-        return True
-    # Last resort: restore from persisted exploration snapshot
-    try:
-        pid = st.session_state.get("pid") or resolve_pid()
-        init_explore_db()
-        snap = load_explore_snapshot("world", pid)
-        if snap:
-            st.session_state["story_mode"] = False
-            st.session_state["onboard_dismissed"] = True
-            return True
-    except Exception:
-        pass
-    return False
 
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, page_icon="🕯️", layout="wide")
     inject_css()
     ensure_keys()
     pid = resolve_pid()
-    if _explore_mode_enabled():
-        render_explore(pid)
-    else:
-        init_db()
-        render_story(pid)
+    init_db()
+    render_story(pid)
     
 if __name__ == "__main__":
     main()
