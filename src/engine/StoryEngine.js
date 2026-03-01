@@ -104,9 +104,10 @@ function genderVisualDirective(gender) {
 
 function basicStyle() {
   return (
-    'Simple, clean black-and-white line-and-wash illustration with a single spot color accent ' +
-    '(gold leaf or lapis). Light crosshatching, clear contours, single focal subject, ' +
-    'medium or close-up shot. Plain white background behind the subject. ' +
+    'Detailed black-and-white ink illustration with a single spot color accent ' +
+    '(gold leaf or lapis). Rich crosshatching, clear contours, deep tonal range from black to mid-gray. ' +
+    'The scene fills the entire frame edge-to-edge with rich environmental detail. ' +
+    'Dark, moody atmosphere throughout — no white or bright backgrounds. Deep shadows and low ambient light. ' +
     'Pre-industrial medieval-fantasy era (roughly 12th–16th century aesthetic). ' +
     'Architecture: stone keeps, timber framing, castles, market stalls; natural materials ' +
     'like wood, leather, linen, iron. Props/weapons allowed: swords, daggers, axes, spears, ' +
