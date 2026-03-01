@@ -114,7 +114,8 @@ function basicStyle() {
     'Strictly no firearms or explosives, no modern clothing (no trenchcoats, suits, ties), ' +
     'no modern tech/vehicles (no cameras, phones, radios, cars, trains, planes, neon, streetlights, power lines). ' +
     'Do not depict the protagonist\'s face directly (use silhouette, hood, or a cropped angle). ' +
-    'Absolutely no text, letters, words, numbers, runes, glyphs, writing, inscriptions, signs, banners, or symbols of any kind anywhere in the image.'
+    'Absolutely no text, letters, words, numbers, runes, glyphs, writing, inscriptions, signs, banners, or symbols of any kind anywhere in the image. ' +
+    'The image must be borderless and frameless — no decorative borders, frames, ornamental edges, vignettes, or margin decorations of any kind. The scene must extend edge-to-edge as if viewed through a window.'
   );
 }
 
@@ -299,6 +300,7 @@ export async function generateIllustration(scene, gender = 'Unspecified') {
     'Atmospheric medieval-fantasy environment; focus on scenery and architecture; ' +
     'no modern elements, no characters in distress, no firearms or explosives; family-friendly, PG-13. ' +
     'Absolutely no text, letters, words, numbers, runes, glyphs, writing, inscriptions, signs, banners, or symbols of any kind anywhere in the image. ' +
+    'The image must be borderless and frameless — no decorative borders, frames, ornamental edges, vignettes, or margin decorations of any kind. The scene must extend edge-to-edge as if viewed through a window. ' +
     gdir;
 
   try {
