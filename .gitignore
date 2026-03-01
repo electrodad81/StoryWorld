@@ -10,3 +10,7 @@ storyworld.db
 *.db
 *.db-shm
 *.db-wal
+
+# Node / Vite
+node_modules/
+dist/

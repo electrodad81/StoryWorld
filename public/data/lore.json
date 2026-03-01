@@ -1,0 +1,144 @@
+{
+  "namespace": "core",
+  "tone_rules": {
+    "aesthetic": [
+      "gothic",
+      "grim",
+      "mysterious",
+      "low-spark magic"
+    ],
+    "violence": "implied or off-screen; keep Teen/PG-13 in phrasing",
+    "themes": [
+      "corruption has a cost",
+      "power demands a price",
+      "light is scarce but stubborn"
+    ]
+  },
+  "magic_rules": {
+    "mana_is_rare": true,
+    "magic_costs": [
+      "blood",
+      "memory",
+      "years_of_life"
+    ],
+    "true_names_bind": true,
+    "moon_aspect_magic": {
+      "new_moon": "omens stronger, illusions thin",
+      "full_moon": "wards weaken, spirits bold"
+    },
+    "teleportation": "ritual_only",
+    "forbidden": [
+      "necromancy beyond one night",
+      "soul_barter",
+      "void_summoning"
+    ]
+  },
+  "factions": {
+    "inquisition": {
+      "name": "Veilbound Inquisition",
+      "values": [
+        "order",
+        "silence",
+        "containment"
+      ]
+    },
+    "pale_court": {
+      "name": "The Pale Court",
+      "values": [
+        "legacy",
+        "forbidden_lore",
+        "patronage"
+      ]
+    },
+    "lantern_guild": {
+      "name": "Lantern Guild",
+      "values": [
+        "commerce",
+        "smuggling",
+        "mutual_aid"
+      ]
+    }
+  },
+  "locations": {
+    "gloamreach": {
+      "mood": "permanent dusk even at noon",
+      "threat": "mist-walkers and oathbreakers",
+      "sounds": [
+        "distant bells",
+        "wet rope",
+        "murmuring fog"
+      ]
+    },
+    "mire_of_thorns": {
+      "mood": "bog with thorn-vines that drink whispers",
+      "threat": "sink-bloom and lantern-thief eels",
+      "sounds": [
+        "bubbles",
+        "thin buzzing",
+        "chain clinks"
+      ]
+    },
+    "sunless_abbey": {
+      "mood": "catacombs under a collapsed cloister",
+      "threat": "oathbound wights that cannot speak",
+      "sounds": [
+        "dripping stone",
+        "pages turning with no wind"
+      ]
+    },
+    "waking_forest": {
+      "mood": "trees that lean to listen",
+      "threat": "memory-leeches and miscounted paths",
+      "sounds": [
+        "creaking bark",
+        "whispered names"
+      ]
+    }
+  },
+  "relics": {
+    "ink_of_concord": {
+      "effect": "any oath written with it cannot be broken without a price",
+      "price": "the writer loses a cherished memory"
+    },
+    "lantern_of_second_dawn": {
+      "effect": "reveals the truth behind illusions at sunrise",
+      "price": "owner never dreams again while it is kept"
+    }
+  },
+  "curses": {
+    "salt_tongue": "speak only in truths when bell tolls are heard",
+    "ashen_mark": "a sigil that burns when an oath is near breaking"
+  },
+  "starter_hooks": [
+    {
+      "id": "HOOK-01",
+      "title": "Bells in the Fog",
+      "blurb": "Low tide reveals a sunken bell tower near Gloamreach. Each toll rewrites a name on the village memorial."
+    },
+    {
+      "id": "HOOK-02",
+      "title": "The Last Oathkeeper",
+      "blurb": "An aged monk from the Sunless Abbey seeks a courier for a vow sealed in living ink."
+    },
+    {
+      "id": "HOOK-03",
+      "title": "Lanterns for the Dead",
+      "blurb": "The Lantern Guild pays well to escort a shipment through the Waking Forest where lights appear that weren\u2019t lit."
+    },
+    {
+      "id": "HOOK-04",
+      "title": "White Sigils, Black Debts",
+      "blurb": "A Pale Court heir offers protection if you recover a ledger that should have burned decades ago."
+    },
+    {
+      "id": "HOOK-05",
+      "title": "Drowned Star\u2019s Whisper",
+      "blurb": "Freshwater wells taste of salt; villagers dream of distant bells and forget their children\u2019s names at dawn."
+    },
+    {
+      "id": "HOOK-06",
+      "title": "Veilbound Audit",
+      "blurb": "The Inquisition arrives to inventory forbidden relics\u2014and one looks suspiciously like your family keepsake."
+    }
+  ]
+}
