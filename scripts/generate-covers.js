@@ -17,7 +17,7 @@ if (!API_KEY) {
   process.exit(1);
 }
 
-const STYLE = `Simple, clean black-and-white line-and-wash illustration with a single spot color accent (gold leaf or lapis). Light crosshatching, clear contours, single focal subject, medium or close-up shot. Pre-industrial medieval-fantasy era (roughly 12th–16th century aesthetic). Architecture: stone keeps, timber framing, castles, market stalls; natural materials like wood, leather, linen, iron. Do not depict any character's face directly (use silhouette, hood, or a cropped angle). No firearms, no modern clothing, no modern tech. Family-friendly, PG-13, no gore.`;
+const STYLE = `Simple, clean black-and-white line-and-wash illustration with a single spot color accent (gold leaf or lapis). Light crosshatching, clear contours, single focal subject, medium or close-up shot. Pre-industrial medieval-fantasy era (roughly 12th–16th century aesthetic). Architecture: stone keeps, timber framing, castles, market stalls; natural materials like wood, leather, linen, iron. Do not depict any character's face directly (use silhouette, hood, or a cropped angle). No firearms, no modern clothing, no modern tech. Family-friendly, PG-13, no gore. Absolutely no text, letters, words, numbers, runes, glyphs, writing, inscriptions, signs, banners, or symbols of any kind anywhere in the image.`;
 
 async function generateImage(prompt) {
   const res = await fetch('https://api.openai.com/v1/images/generations', {

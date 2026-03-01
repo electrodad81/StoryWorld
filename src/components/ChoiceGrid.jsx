@@ -6,7 +6,6 @@ export default function ChoiceGrid({ choices, onChoose, disabled }) {
 
   return (
     <div className="choice-grid">
-      <h3>Your choices</h3>
       {choices.map((label, i) => (
         <button
           key={i}

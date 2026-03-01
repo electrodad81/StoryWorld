@@ -113,7 +113,8 @@ function basicStyle() {
     'shields, bows, torches, lanterns, books, scrolls, potions. ' +
     'Strictly no firearms or explosives, no modern clothing (no trenchcoats, suits, ties), ' +
     'no modern tech/vehicles (no cameras, phones, radios, cars, trains, planes, neon, streetlights, power lines). ' +
-    'Do not depict the protagonist\'s face directly (use silhouette, hood, or a cropped angle).'
+    'Do not depict the protagonist\'s face directly (use silhouette, hood, or a cropped angle). ' +
+    'Absolutely no text, letters, words, numbers, runes, glyphs, writing, inscriptions, signs, banners, or symbols of any kind anywhere in the image.'
   );
 }
 
@@ -175,7 +176,7 @@ export async function* streamScene(history, lore, {
   const sysBase =
     'You are the narrative engine for a PG dark-fantasy interactive story called Gloamreach.\n' +
     'Write in present tense, second person. Do not name the protagonist; if a Name exists, it may appear only in NPC dialogue.\n' +
-    'Keep prose tight by default (~85–150 words, single paragraph). Maintain continuity with prior scenes.\n' +
+    'Keep prose very tight (~60–90 words, single short paragraph). Every word must earn its place. Maintain continuity with prior scenes.\n' +
     'Consequence contract: If the last player choice was risky, show a visible cost in THIS scene (wound, gear loss, time pressure, ally setback, exposure to threat). Do NOT undo it immediately. ' +
     'If the player chose risky paths in two consecutive scenes, escalate to a serious setback (capture, grave wound, loss). Only when fictionally fitting, you may kill the protagonist.\n' +
     "If (and only if) the protagonist dies in this scene, append exactly '\\n\\n[DEATH]' as the final line. Do not add any text after [DEATH].";
@@ -207,14 +208,14 @@ export async function* streamScene(history, lore, {
     'Player history (latest last):\n' +
     `${historyText(history)}\n\n` +
     'Output text in second person, present tense.\n' +
-    'Length: ~85–150 words. End cleanly; do not start a new paragraph.';
+    'Length: ~60–90 words. One compact paragraph. End cleanly; no new paragraphs.';
 
   const messages = [
     { role: 'system', content: sysBase + '\n\n' + prompt },
     { role: 'user', content: user },
   ];
 
-  yield* chatCompletion(messages, { temperature: 0.9, max_tokens: 350 });
+  yield* chatCompletion(messages, { temperature: 0.9, max_tokens: 200 });
 }
 
 /**
@@ -297,6 +298,7 @@ export async function generateIllustration(scene, gender = 'Unspecified') {
     `${basicStyle()} ` +
     'Atmospheric medieval-fantasy environment; focus on scenery and architecture; ' +
     'no modern elements, no characters in distress, no firearms or explosives; family-friendly, PG-13. ' +
+    'Absolutely no text, letters, words, numbers, runes, glyphs, writing, inscriptions, signs, banners, or symbols of any kind anywhere in the image. ' +
     gdir;
 
   try {
