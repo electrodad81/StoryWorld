@@ -99,7 +99,7 @@ export async function chatCompletionFull(messages, options = {}) {
  * Image generation via DALL-E. Returns an image URL or data URI.
  */
 export async function imageGeneration(prompt, options = {}) {
-  const { model = 'dall-e-3', size = '1024x1024' } = options;
+  const { model = 'dall-e-3', size = '1024x1792' } = options;
 
   const res = await fetch(`${API_BASE}/images/generations`, {
     method: 'POST',

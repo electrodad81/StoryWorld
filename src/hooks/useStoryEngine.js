@@ -6,8 +6,8 @@ import { streamScene, generateChoices, generateIllustration, BEATS, BEAT_TARGET_
 import { ensureBrowserId } from '../services/identity.js';
 import { saveSnapshot, loadSnapshot, deleteSnapshot } from '../services/persistence.js';
 
-const ILLUSTRATION_EVERY_N = 3;
-const ILLUSTRATION_PHASE = 1;
+const ILLUSTRATION_EVERY_N = 2;
+const ILLUSTRATION_PHASE = 0;
 
 function shouldIllustrate(sceneIndex) {
   return ((sceneIndex - ILLUSTRATION_PHASE) % ILLUSTRATION_EVERY_N) === 0;
@@ -71,7 +71,8 @@ export default function useStoryEngine() {
     setIsStreaming(true);
     setStreamedText('');
     setChoices([]);
-    setIllustration(null);
+    // Don't clear illustration — persistedBg in StoryView keeps the
+    // last image visible. New illustrations crossfade in when ready.
 
     let fullText = '';
     try {
@@ -164,7 +165,20 @@ export default function useStoryEngine() {
     setDangerStreak(0);
     setCurrentScene('');
     setChoices([]);
-    setIllustration(null);
+
+    // Show static cover image instantly, then fire DALL-E to replace it
+    if (profile.starterHook?.coverImage) {
+      setIllustration(profile.starterHook.coverImage);
+    } else {
+      setIllustration(null);
+    }
+
+    // Fire DALL-E illustration from hook blurb (non-blocking, crossfades in when ready)
+    if (profile.starterHook) {
+      generateIllustration(profile.starterHook.blurb, profile.gender)
+        .then((url) => { if (url) setIllustration(url); })
+        .catch(() => {});
+    }
 
     // Build initial history with starter hook context
     const hookContext = profile.starterHook

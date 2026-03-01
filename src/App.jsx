@@ -1,7 +1,8 @@
 // src/App.jsx
 // Root component — conditional render based on game phase.
+// Sidebar is now a slide-over drawer toggled by hamburger menu.
 
-import { useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import './App.css';
 import useStoryEngine from './hooks/useStoryEngine.js';
 import ApiKeyInput from './components/ApiKeyInput.jsx';
@@ -11,6 +12,7 @@ import Sidebar from './components/Sidebar.jsx';
 
 export default function App() {
   const engine = useStoryEngine();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // Load lore on mount
   useEffect(() => {
@@ -35,14 +37,23 @@ export default function App() {
     );
   }
 
-  // Playing / dead
+  // Playing / dead — immersive layout with drawer sidebar
   return (
     <div className="app-layout">
-      <Sidebar
-        playerProfile={engine.playerProfile}
-        onNewStory={engine.newStory}
-        onReset={engine.resetGame}
-      />
+      {/* Drawer backdrop */}
+      {sidebarOpen && (
+        <div className="drawer-backdrop" onClick={() => setSidebarOpen(false)} />
+      )}
+
+      {/* Drawer */}
+      <div className={`drawer${sidebarOpen ? ' open' : ''}`}>
+        <Sidebar
+          playerProfile={engine.playerProfile}
+          onNewStory={() => { setSidebarOpen(false); engine.newStory(); }}
+          onReset={() => { setSidebarOpen(false); engine.resetGame(); }}
+        />
+      </div>
+
       <StoryView
         currentScene={engine.currentScene}
         isStreaming={engine.isStreaming}
@@ -53,6 +64,8 @@ export default function App() {
         isGenerating={engine.isGenerating}
         isDead={engine.isDead}
         onNewStory={engine.newStory}
+        beat={engine.beat}
+        onMenuToggle={() => setSidebarOpen((v) => !v)}
       />
     </div>
   );
