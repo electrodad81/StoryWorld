@@ -1,9 +1,23 @@
 // src/components/CharacterSetup.jsx
 // Character creation: name, gender, archetype, starter hook selection.
+// Locked hooks render dimmed with unlock hints.
 
 import { useState, useEffect } from 'react';
 
-export default function CharacterSetup({ lore, onBegin }) {
+const UNLOCK_HINTS = {
+  stories_completed: (min) => min === 1 ? 'Complete any story to unlock' : `Complete ${min} stories to unlock`,
+  stories_survived: (min) => min === 1 ? 'Survive a story to unlock' : `Survive ${min} stories to unlock`,
+  stories_died: (min) => min === 1 ? 'Die in a story to unlock' : `Die ${min} times to unlock`,
+};
+
+function getUnlockHint(hook) {
+  if (!hook.unlockCondition) return null;
+  const { type, min } = hook.unlockCondition;
+  const hintFn = UNLOCK_HINTS[type];
+  return hintFn ? hintFn(min) : 'Keep playing to unlock';
+}
+
+export default function CharacterSetup({ lore, unlockedHooks, onBegin }) {
   const [name, setName] = useState('');
   const [gender, setGender] = useState('Unspecified');
   const [archetype] = useState('Default');
@@ -13,11 +27,20 @@ export default function CharacterSetup({ lore, onBegin }) {
   useEffect(() => {
     if (lore?.starter_hooks) {
       setHooks(lore.starter_hooks);
-      if (lore.starter_hooks.length > 0) {
-        setSelectedHook(lore.starter_hooks[0].id);
+      // Auto-select first unlocked hook
+      const firstUnlocked = lore.starter_hooks.find(h =>
+        !h.unlockCondition || (unlockedHooks && unlockedHooks.includes(h.id))
+      );
+      if (firstUnlocked) {
+        setSelectedHook(firstUnlocked.id);
       }
     }
-  }, [lore]);
+  }, [lore, unlockedHooks]);
+
+  const isHookUnlocked = (hook) => {
+    if (!hook.unlockCondition) return true;
+    return unlockedHooks && unlockedHooks.includes(hook.id);
+  };
 
   const canBegin = name.trim().length > 0 && selectedHook;
 
@@ -77,16 +100,27 @@ export default function CharacterSetup({ lore, onBegin }) {
               Choose your starting hook
             </h3>
             <div className="hook-list">
-              {hooks.map((hook) => (
-                <div
-                  key={hook.id}
-                  className={`hook-card${selectedHook === hook.id ? ' selected' : ''}`}
-                  onClick={() => setSelectedHook(hook.id)}
-                >
-                  <h4>{hook.title}</h4>
-                  <p>{hook.blurb}</p>
-                </div>
-              ))}
+              {hooks.map((hook) => {
+                const unlocked = isHookUnlocked(hook);
+                const hint = getUnlockHint(hook);
+                return (
+                  <div
+                    key={hook.id}
+                    className={`hook-card${selectedHook === hook.id ? ' selected' : ''}${!unlocked ? ' locked' : ''}`}
+                    onClick={unlocked ? () => setSelectedHook(hook.id) : undefined}
+                  >
+                    <div className="hook-card-header">
+                      <h4>{hook.title}</h4>
+                      {!unlocked && <span className="lock-icon">&#128274;</span>}
+                    </div>
+                    {unlocked ? (
+                      <p>{hook.blurb}</p>
+                    ) : (
+                      <p className="hook-hint">{hint}</p>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </>
         )}

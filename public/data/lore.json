@@ -114,37 +114,43 @@
       "id": "HOOK-01",
       "title": "Bells in the Fog",
       "blurb": "Low tide reveals a sunken bell tower near Gloamreach. Each toll rewrites a name on the village memorial.",
-      "coverImage": "/images/hook-01.png"
+      "coverImage": "/images/hook-01.png",
+      "unlockCondition": null
     },
     {
       "id": "HOOK-02",
       "title": "The Last Oathkeeper",
       "blurb": "An aged monk from the Sunless Abbey seeks a courier for a vow sealed in living ink.",
-      "coverImage": "/images/hook-02.png"
+      "coverImage": "/images/hook-02.png",
+      "unlockCondition": null
     },
     {
       "id": "HOOK-03",
       "title": "Lanterns for the Dead",
       "blurb": "The Lantern Guild pays well to escort a shipment through the Waking Forest where lights appear that weren\u2019t lit.",
-      "coverImage": "/images/hook-03.png"
+      "coverImage": "/images/hook-03.png",
+      "unlockCondition": { "type": "stories_completed", "min": 1 }
     },
     {
       "id": "HOOK-04",
       "title": "White Sigils, Black Debts",
       "blurb": "A Pale Court heir offers protection if you recover a ledger that should have burned decades ago.",
-      "coverImage": "/images/hook-04.png"
+      "coverImage": "/images/hook-04.png",
+      "unlockCondition": { "type": "stories_survived", "min": 1 }
     },
     {
       "id": "HOOK-05",
       "title": "Drowned Star\u2019s Whisper",
       "blurb": "Freshwater wells taste of salt; villagers dream of distant bells and forget their children\u2019s names at dawn.",
-      "coverImage": "/images/hook-05.png"
+      "coverImage": "/images/hook-05.png",
+      "unlockCondition": { "type": "stories_died", "min": 1 }
     },
     {
       "id": "HOOK-06",
       "title": "Veilbound Audit",
       "blurb": "The Inquisition arrives to inventory forbidden relics\u2014and one looks suspiciously like your family keepsake.",
-      "coverImage": "/images/hook-06.png"
+      "coverImage": "/images/hook-06.png",
+      "unlockCondition": { "type": "stories_completed", "min": 3 }
     }
   ]
 }

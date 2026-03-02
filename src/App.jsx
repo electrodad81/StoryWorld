@@ -1,15 +1,18 @@
 // src/App.jsx
-// Root component — conditional render based on game phase and mode.
+// Root component — conditional render based on game phase, mode, and journal state.
 // Sidebar is a slide-over drawer toggled by hamburger menu.
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import './App.css';
 import useStoryEngine from './hooks/useStoryEngine.js';
 import useExploreEngine from './hooks/useExploreEngine.js';
+import { loadJournal, saveJournal } from './services/journal.js';
 import ApiKeyInput from './components/ApiKeyInput.jsx';
 import ModeSelect from './components/ModeSelect.jsx';
 import CharacterSetup from './components/CharacterSetup.jsx';
 import StoryView from './components/StoryView.jsx';
+import StoryComplete from './components/StoryComplete.jsx';
+import JournalView from './components/JournalView.jsx';
 import ExploreView from './components/ExploreView.jsx';
 import Sidebar from './components/Sidebar.jsx';
 
@@ -17,13 +20,26 @@ export default function App() {
   const engine = useStoryEngine();
   const explore = useExploreEngine();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [gameMode, setGameMode] = useState(null); // 'story' | 'explore' | null
+  const [gameMode, setGameMode] = useState(null); // 'story' | 'explore' | 'journal' | null
+  const [journal, setJournal] = useState(() => loadJournal());
+
+  // Refresh journal from localStorage
+  const refreshJournal = useCallback(() => {
+    setJournal(loadJournal());
+  }, []);
 
   // Load lore and world data on mount
   useEffect(() => {
     engine.loadLore();
     explore.loadWorldData();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Refresh journal when returning to menu
+  const handleReturnToMenu = useCallback(() => {
+    setSidebarOpen(false);
+    setGameMode(null);
+    refreshJournal();
+  }, [refreshJournal]);
 
   // API key needed
   if (engine.phase === 'needKey') {
@@ -38,7 +54,54 @@ export default function App() {
   if (!gameMode) {
     return (
       <div className="app-layout">
-        <ModeSelect onSelectMode={setGameMode} />
+        <ModeSelect
+          onSelectMode={setGameMode}
+          explorationUnlocked={journal.explorationUnlocked}
+          hasJournalEntries={journal.storiesPlayed.length > 0}
+          onResetJournal={() => {
+            localStorage.removeItem('gloamreach_journal');
+            refreshJournal();
+          }}
+          onResetAll={() => {
+            localStorage.removeItem('gloamreach_journal');
+            localStorage.removeItem('gloamreach_explore_state');
+            engine.resetGame();
+            explore.resetExplore();
+            refreshJournal();
+          }}
+        />
+      </div>
+    );
+  }
+
+  // Journal view
+  if (gameMode === 'journal') {
+    return (
+      <div className="app-layout">
+        <JournalView
+          journal={journal}
+          lore={engine.lore}
+          onBack={handleReturnToMenu}
+        />
+      </div>
+    );
+  }
+
+  // Story mode: complete screen
+  if (gameMode === 'story' && engine.phase === 'complete') {
+    return (
+      <div className="app-layout">
+        <StoryComplete
+          playerProfile={engine.playerProfile}
+          history={engine.history}
+          beat={engine.beat}
+          sceneCount={engine.sceneCount}
+          isDead={engine.isDead}
+          lore={engine.lore}
+          onPlayAgain={() => { refreshJournal(); engine.newStory(); }}
+          onReturnToMenu={handleReturnToMenu}
+          onViewJournal={() => { refreshJournal(); setGameMode('journal'); }}
+        />
       </div>
     );
   }
@@ -47,7 +110,11 @@ export default function App() {
   if (gameMode === 'story' && engine.phase === 'setup') {
     return (
       <div className="app-layout">
-        <CharacterSetup lore={engine.lore} onBegin={engine.startGame} />
+        <CharacterSetup
+          lore={engine.lore}
+          unlockedHooks={journal.unlockedHooks}
+          onBegin={engine.startGame}
+        />
       </div>
     );
   }
@@ -67,13 +134,13 @@ export default function App() {
             <h2>Exploration</h2>
             <button
               className="sidebar-btn"
-              onClick={() => { setSidebarOpen(false); setGameMode(null); }}
+              onClick={handleReturnToMenu}
             >
               Return to Menu
             </button>
             <button
               className="sidebar-btn danger"
-              onClick={() => { setSidebarOpen(false); explore.resetExplore(); setGameMode(null); }}
+              onClick={() => { setSidebarOpen(false); explore.resetExplore(); setGameMode(null); refreshJournal(); }}
             >
               Reset Exploration
             </button>
@@ -101,7 +168,7 @@ export default function App() {
         <Sidebar
           playerProfile={engine.playerProfile}
           onNewStory={() => { setSidebarOpen(false); engine.newStory(); }}
-          onReset={() => { setSidebarOpen(false); engine.resetGame(); setGameMode(null); }}
+          onReset={() => { setSidebarOpen(false); engine.resetGame(); handleReturnToMenu(); }}
         />
       </div>
 
@@ -114,7 +181,9 @@ export default function App() {
         onChoose={engine.chooseOption}
         isGenerating={engine.isGenerating}
         isDead={engine.isDead}
+        isResolution={engine.isResolution}
         onNewStory={engine.newStory}
+        onComplete={engine.completeStory}
         beat={engine.beat}
         onMenuToggle={() => setSidebarOpen((v) => !v)}
       />

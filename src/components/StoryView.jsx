@@ -16,7 +16,9 @@ export default function StoryView({
   onChoose,
   isGenerating,
   isDead,
+  isResolution,
   onNewStory,
+  onComplete,
   beat,
   onMenuToggle,
 }) {
@@ -96,8 +98,16 @@ export default function StoryView({
           <div className="death-screen">
             <h3>You Died.</h3>
             <p>Your adventure ends in tragedy.</p>
-            <button className="sidebar-btn" onClick={onNewStory} style={{ marginTop: '0.75rem' }}>
-              Start New Story
+            <button className="sidebar-btn" onClick={onComplete} style={{ marginTop: '0.75rem' }}>
+              Continue
+            </button>
+          </div>
+        )}
+
+        {isResolution && !isDead && (
+          <div className="resolution-screen">
+            <button className="sidebar-btn accent" onClick={onComplete} style={{ marginTop: '0.75rem' }}>
+              Story Complete
             </button>
           </div>
         )}

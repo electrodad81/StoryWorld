@@ -32,6 +32,7 @@ export default function useStoryEngine() {
   const [streamedText, setStreamedText] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [isDead, setIsDead] = useState(false);
+  const [isResolution, setIsResolution] = useState(false);
   const [lore, setLore] = useState(null);
 
   const abortRef = useRef(null);
@@ -135,6 +136,14 @@ export default function useStoryEngine() {
       return;
     }
 
+    // Resolution beat — no choices, story is complete
+    if (newBeat === 'resolution') {
+      setChoices([]);
+      setIsResolution(true);
+      setIsGenerating(false);
+      return;
+    }
+
     // Generate choices
     try {
       const newChoices = await generateChoices(newHist, fullText, loreData);
@@ -212,6 +221,11 @@ export default function useStoryEngine() {
     await runTurn(newHist, loreData, playerProfile, beat, newDanger, sceneCount, beatIndex);
   }, [isGenerating, isStreaming, history, dangerStreak, loadLore, playerProfile, beat, sceneCount, beatIndex, runTurn]);
 
+  // Transition to the story-complete screen
+  const completeStory = useCallback(() => {
+    setPhase('complete');
+  }, []);
+
   // Reset game to character creation
   const resetGame = useCallback(() => {
     setPhase('setup');
@@ -228,6 +242,7 @@ export default function useStoryEngine() {
     setStreamedText('');
     setIsGenerating(false);
     setIsDead(false);
+    setIsResolution(false);
     try {
       deleteSnapshot(pidRef.current);
     } catch {
@@ -253,6 +268,7 @@ export default function useStoryEngine() {
     setStreamedText('');
     setIsGenerating(false);
     setIsDead(false);
+    setIsResolution(false);
     setPhase('setup');
   }, [playerProfile, resetGame]);
 
@@ -276,12 +292,15 @@ export default function useStoryEngine() {
     streamedText,
     isGenerating,
     isDead,
+    isResolution,
     lore,
     loadLore,
     startGame,
     chooseOption,
     resetGame,
     newStory,
+    completeStory,
     setApiKey,
+    beatIndex,
   };
 }

@@ -3,6 +3,7 @@
 
 import { useState, useCallback } from 'react';
 import { streamNPCDialogue, generateInteractionOptions, calculateDispositionDelta } from '../engine/ExploreEngine.js';
+import { loadJournal, addExploreLore } from '../services/journal.js';
 
 const EXPLORE_STORAGE_KEY = 'gloamreach_explore_state';
 
@@ -127,6 +128,12 @@ export default function useExploreEngine() {
     if (!discoveredLocations.includes(locationId)) {
       setDiscoveredLocations(prev => [...prev, locationId]);
     }
+
+    // Write location discovery to journal
+    try {
+      const journal = loadJournal();
+      addExploreLore(journal, { locations: [locationId] });
+    } catch {}
   }, [worldData, getCurrentLocation, discoveredLocations]);
 
   // Start talking to an NPC
@@ -138,6 +145,14 @@ export default function useExploreEngine() {
     setActiveNpc(npc);
     setConversationHistory([]);
     setExplorePhase('conversation');
+
+    // Write NPC encounter to journal
+    try {
+      const journal = loadJournal();
+      const loreUpdate = { npcs: [npc.name] };
+      if (npc.faction) loreUpdate.factions = [npc.faction];
+      addExploreLore(journal, loreUpdate);
+    } catch {}
 
     // Generate initial interaction options
     setIsGenerating(true);
