@@ -1,0 +1,91 @@
+{
+  "region": {
+    "id": "withered-vale",
+    "name": "The Withered Vale",
+    "description": "A sunken valley where the mist never lifts. Crooked trees line paths that shift between visits, and the locals speak in half-truths."
+  },
+  "locations": [
+    {
+      "id": "vale-crossroads",
+      "name": "The Crossroads",
+      "description": "A junction of three muddy paths marked by a leaning signpost. The wood is too rotted to read, but someone has scratched fresh arrows into it with a knife.",
+      "mood": "uneasy stillness, low wind",
+      "connections": ["thornwatch-inn", "old-mill"],
+      "isHidden": false,
+      "unlockCondition": null,
+      "coverImage": "/images/explore/vale-crossroads.png"
+    },
+    {
+      "id": "thornwatch-inn",
+      "name": "Thornwatch Inn",
+      "description": "A squat building with boarded windows and a fire that never seems to warm the room. The innkeeper watches everyone but says little.",
+      "mood": "smoky warmth masking tension",
+      "connections": ["vale-crossroads", "old-mill"],
+      "isHidden": false,
+      "unlockCondition": null,
+      "coverImage": "/images/explore/thornwatch-inn.png"
+    },
+    {
+      "id": "old-mill",
+      "name": "The Old Mill",
+      "description": "The waterwheel still turns, though no one tends it. Inside, grain sacks rot and something scratches behind the walls at night.",
+      "mood": "grinding rhythm, damp decay",
+      "connections": ["vale-crossroads", "thornwatch-inn"],
+      "isHidden": false,
+      "unlockCondition": null,
+      "coverImage": "/images/explore/old-mill.png"
+    }
+  ],
+  "npcs": [
+    {
+      "id": "maren",
+      "name": "Maren",
+      "locationId": "thornwatch-inn",
+      "archetype": "guarded innkeeper",
+      "faction": "lantern_guild",
+      "personalityTraits": ["pragmatic", "suspicious", "dry humor"],
+      "baseDisposition": 40,
+      "greeting": "Another traveler. Sit if you like. Don't touch the ledger.",
+      "backstory": "Maren runs the Thornwatch Inn and serves as an unofficial fence for the Lantern Guild. She knows everyone's secrets and trades in them carefully.",
+      "portrait": "/images/explore/npc-maren.png"
+    },
+    {
+      "id": "edric",
+      "name": "Edric",
+      "locationId": "vale-crossroads",
+      "archetype": "wandering oathbreaker",
+      "faction": null,
+      "personalityTraits": ["melancholic", "cryptic", "honorable despite fall"],
+      "baseDisposition": 55,
+      "greeting": "You have the look of someone who hasn't yet learned what this place costs.",
+      "backstory": "Edric was once a sworn knight of the Veilbound Inquisition. He broke an oath and now wanders the Vale, unable to leave. He knows things about the old wards.",
+      "portrait": "/images/explore/npc-edric.png"
+    },
+    {
+      "id": "sibyl",
+      "name": "Sibyl",
+      "locationId": "old-mill",
+      "archetype": "reclusive herbalist",
+      "faction": "pale_court",
+      "personalityTraits": ["patient", "knowing", "speaks in riddles"],
+      "baseDisposition": 30,
+      "greeting": "The wheel turns. So do you, it seems. What brings you to where things are ground down?",
+      "backstory": "Sibyl tends a hidden garden behind the mill and supplies the Pale Court with rare reagents. She speaks obliquely but her advice, when understood, is always precise.",
+      "portrait": "/images/explore/npc-sibyl.png"
+    }
+  ],
+  "factions": {
+    "lantern_guild": {
+      "name": "Lantern Guild",
+      "description": "Smugglers and pragmatists who keep the Vale's economy alive."
+    },
+    "pale_court": {
+      "name": "The Pale Court",
+      "description": "Keepers of forbidden knowledge who trade in debts and secrets."
+    },
+    "inquisition": {
+      "name": "Veilbound Inquisition",
+      "description": "Enforcers of order who silence what they cannot contain."
+    }
+  }
+}
