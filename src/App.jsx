@@ -7,6 +7,7 @@ import './App.css';
 import useStoryEngine from './hooks/useStoryEngine.js';
 import useExploreEngine from './hooks/useExploreEngine.js';
 import { loadJournal, saveJournal } from './services/journal.js';
+import { resetWorldState } from './services/worldState.js';
 import ApiKeyInput from './components/ApiKeyInput.jsx';
 import ModeSelect from './components/ModeSelect.jsx';
 import CharacterSetup from './components/CharacterSetup.jsx';
@@ -65,6 +66,7 @@ export default function App() {
           onResetAll={() => {
             localStorage.removeItem('gloamreach_journal');
             localStorage.removeItem('gloamreach_explore_state');
+            resetWorldState();
             engine.resetGame();
             explore.resetExplore();
             refreshJournal();
@@ -98,9 +100,17 @@ export default function App() {
           sceneCount={engine.sceneCount}
           isDead={engine.isDead}
           lore={engine.lore}
+          explorationUnlocked={journal.explorationUnlocked}
           onPlayAgain={() => { refreshJournal(); engine.newStory(); }}
           onReturnToMenu={handleReturnToMenu}
           onViewJournal={() => { refreshJournal(); setGameMode('journal'); }}
+          onWakeInGraveyard={() => {
+            refreshJournal();
+            // Unlock and travel to graveyard
+            explore.discoverLocation('vale-graveyard');
+            explore.setStartLocation('vale-graveyard');
+            setGameMode('explore');
+          }}
         />
       </div>
     );
@@ -119,6 +129,19 @@ export default function App() {
     );
   }
 
+  // Explore mode — journal sub-view
+  if (gameMode === 'explore' && explore.explorePhase === 'journal') {
+    return (
+      <div className="app-layout">
+        <JournalView
+          journal={loadJournal()}
+          lore={engine.lore}
+          onBack={() => explore.closeJournal()}
+        />
+      </div>
+    );
+  }
+
   // Explore mode
   if (gameMode === 'explore') {
     return (
@@ -132,6 +155,12 @@ export default function App() {
         <div className={`drawer${sidebarOpen ? ' open' : ''}`}>
           <div className="app-sidebar">
             <h2>Exploration</h2>
+            <button
+              className="sidebar-btn"
+              onClick={() => { setSidebarOpen(false); explore.openJournal(); }}
+            >
+              View Journal
+            </button>
             <button
               className="sidebar-btn"
               onClick={handleReturnToMenu}

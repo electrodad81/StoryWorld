@@ -1,8 +1,9 @@
 // src/components/StoryComplete.jsx
-// End-of-story summary screen. Writes journal entry and shows unlocks/achievements.
+// End-of-story summary screen. Writes journal entry, applies story effects, shows unlocks/achievements.
 
 import { useState, useEffect, useRef } from 'react';
 import { loadJournal, addStoryEntry, extractLoreFromHistory } from '../services/journal.js';
+import { applyStoryEffects } from '../services/worldState.js';
 
 export default function StoryComplete({
   playerProfile,
@@ -11,14 +12,16 @@ export default function StoryComplete({
   sceneCount,
   isDead,
   lore,
+  explorationUnlocked,
   onPlayAgain,
   onReturnToMenu,
   onViewJournal,
+  onWakeInGraveyard,
 }) {
   const [result, setResult] = useState(null);
   const hasWritten = useRef(false);
 
-  // Write journal entry on mount (once — ref guards against StrictMode double-mount)
+  // Write journal entry and apply story effects on mount (ref guards against StrictMode double-mount)
   useEffect(() => {
     if (hasWritten.current) return;
     hasWritten.current = true;
@@ -48,6 +51,16 @@ export default function StoryComplete({
       relicsFound: extracted.relics,
       cursesFound: extracted.curses,
     });
+
+    // Apply story effects to world state
+    if (hook?.id) {
+      fetch('/data/story-effects.json')
+        .then(res => res.json())
+        .then(effectsData => {
+          applyStoryEffects(hook.id, outcome, effectsData, storyResult.journal);
+        })
+        .catch(() => {}); // Non-critical — effects are a bonus
+    }
 
     setResult(storyResult);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -136,6 +149,11 @@ export default function StoryComplete({
 
         {/* Actions */}
         <div className="complete-actions">
+          {isDead && explorationUnlocked && onWakeInGraveyard && (
+            <button className="choice-btn graveyard-btn" onClick={onWakeInGraveyard}>
+              Wake in the Graveyard
+            </button>
+          )}
           <button className="choice-btn" onClick={onPlayAgain}>Play Again</button>
           <button className="choice-btn" onClick={onViewJournal}>View Journal</button>
           <button className="choice-btn" onClick={onReturnToMenu}>Return to Menu</button>

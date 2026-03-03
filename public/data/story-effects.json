@@ -1,0 +1,200 @@
+{
+  "HOOK-01": {
+    "title": "Bells in the Fog",
+    "onComplete": {
+      "survived": {
+        "locationOverrides": {
+          "vale-crossroads": {
+            "extraDetail": "A faint toll echoes from the south, though the fog has thinned since the bell tower was silenced. Locals speak your name in low, grateful tones."
+          }
+        },
+        "npcDialogueFlags": {
+          "edric": ["knows_about_bells", "respects_player"],
+          "maren": ["heard_about_bells"]
+        },
+        "factionRepBonus": {}
+      },
+      "died": {
+        "locationOverrides": {
+          "vale-crossroads": {
+            "extraDetail": "The bell tower still tolls at low tide. A fresh name has appeared on the village memorial — yours, though you stand here reading it."
+          }
+        },
+        "npcDialogueFlags": {
+          "edric": ["knows_about_bells", "wary_of_player"],
+          "sibyl": ["sensed_player_death"]
+        },
+        "factionRepBonus": {}
+      }
+    }
+  },
+  "HOOK-02": {
+    "title": "The Last Oathkeeper",
+    "onComplete": {
+      "survived": {
+        "locationOverrides": {
+          "vale-crossroads": {
+            "extraDetail": "The old monk's vow has been delivered. A faint warmth lingers near the signpost, as though something once bound here has loosened."
+          }
+        },
+        "npcDialogueFlags": {
+          "edric": ["knows_about_oath", "respects_player"],
+          "sibyl": ["heard_about_oathkeeper"]
+        },
+        "factionRepBonus": {
+          "inquisition": 10
+        }
+      },
+      "died": {
+        "locationOverrides": {
+          "vale-crossroads": {
+            "extraDetail": "The old monk's courier never returned. Locals say the living ink has dried to rust, and the vow remains undelivered."
+          }
+        },
+        "npcDialogueFlags": {
+          "edric": ["knows_about_oath", "mourns_courier"],
+          "sibyl": ["sensed_player_death"]
+        },
+        "factionRepBonus": {}
+      }
+    }
+  },
+  "HOOK-03": {
+    "title": "Lanterns for the Dead",
+    "onComplete": {
+      "survived": {
+        "locationOverrides": {
+          "thornwatch-inn": {
+            "extraDetail": "A new lantern hangs behind the bar — one that wasn't there before. Maren glances at it when she thinks no one is watching."
+          }
+        },
+        "npcDialogueFlags": {
+          "maren": ["grateful_for_lanterns", "heard_about_shipment"],
+          "edric": ["heard_about_forest_lights"]
+        },
+        "factionRepBonus": {
+          "lantern_guild": 15
+        }
+      },
+      "died": {
+        "locationOverrides": {
+          "thornwatch-inn": {
+            "extraDetail": "The shipment never arrived. The Lantern Guild runners drink in silence, and the cellar door stays shut."
+          }
+        },
+        "npcDialogueFlags": {
+          "maren": ["lost_shipment", "wary_of_player"],
+          "sibyl": ["sensed_player_death"]
+        },
+        "factionRepBonus": {
+          "lantern_guild": -10
+        }
+      }
+    }
+  },
+  "HOOK-04": {
+    "title": "White Sigils, Black Debts",
+    "onComplete": {
+      "survived": {
+        "locationOverrides": {
+          "old-mill": {
+            "extraDetail": "The grinding of the waterwheel sounds different now — steadier, as though a debt has been settled and the mechanism can breathe again."
+          }
+        },
+        "npcDialogueFlags": {
+          "sibyl": ["knows_about_ledger_recovery", "curious_about_star"],
+          "maren": ["heard_about_pale_court_debt"]
+        },
+        "factionRepBonus": {
+          "pale_court": 15
+        }
+      },
+      "died": {
+        "locationOverrides": {
+          "old-mill": {
+            "extraDetail": "The ledger was never recovered. Sibyl's garden has grown wilder, and the scratching behind the mill walls is louder at night."
+          }
+        },
+        "npcDialogueFlags": {
+          "sibyl": ["sensed_player_death", "disappointed_in_player"],
+          "maren": ["heard_about_pale_court_debt"]
+        },
+        "factionRepBonus": {
+          "pale_court": -10
+        }
+      }
+    }
+  },
+  "HOOK-05": {
+    "title": "Drowned Star's Whisper",
+    "onComplete": {
+      "survived": {
+        "locationOverrides": {
+          "old-mill": {
+            "extraDetail": "The well behind the mill has gone quiet. The water tastes clean again, though Sibyl watches the surface with an expression that isn't relief."
+          },
+          "vale-crossroads": {
+            "extraDetail": "The wells no longer taste of salt. Children sleep soundly again, though their parents remember the dreams they can't quite name."
+          }
+        },
+        "npcDialogueFlags": {
+          "sibyl": ["knows_about_drowned_star", "grateful_for_lanterns"],
+          "edric": ["heard_about_salt_wells"]
+        },
+        "factionRepBonus": {
+          "pale_court": 10
+        }
+      },
+      "died": {
+        "locationOverrides": {
+          "vale-crossroads": {
+            "extraDetail": "The wells still taste of salt. Parents whisper about the dreams their children can't shake, and the name they keep repeating — yours."
+          }
+        },
+        "npcDialogueFlags": {
+          "sibyl": ["sensed_player_death", "knows_about_drowned_star"],
+          "edric": ["heard_about_salt_wells", "wary_of_player"]
+        },
+        "factionRepBonus": {}
+      }
+    }
+  },
+  "HOOK-06": {
+    "title": "Veilbound Audit",
+    "onComplete": {
+      "survived": {
+        "locationOverrides": {
+          "vale-crossroads": {
+            "extraDetail": "The Inquisition auditors have departed. Their marks remain on doorframes — white sigils that haven't yet faded. But you're still standing."
+          },
+          "thornwatch-inn": {
+            "extraDetail": "Maren keeps glancing at the door, as though expecting the Inquisition to return. But they haven't. Not yet."
+          }
+        },
+        "npcDialogueFlags": {
+          "maren": ["trusts_player", "survived_audit"],
+          "edric": ["respects_player", "knows_about_audit"],
+          "sibyl": ["heard_about_audit"]
+        },
+        "factionRepBonus": {
+          "inquisition": -10
+        }
+      },
+      "died": {
+        "locationOverrides": {
+          "vale-crossroads": {
+            "extraDetail": "The Inquisition's audit concluded without incident — for them. Your name has been added to their register of 'resolved cases.'"
+          }
+        },
+        "npcDialogueFlags": {
+          "maren": ["mourns_audit_loss"],
+          "edric": ["knows_about_audit", "wary_of_player"],
+          "sibyl": ["sensed_player_death"]
+        },
+        "factionRepBonus": {
+          "inquisition": 5
+        }
+      }
+    }
+  }
+}

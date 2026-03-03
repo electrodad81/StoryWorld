@@ -5,6 +5,7 @@ import { useState, useCallback, useRef } from 'react';
 import { streamScene, generateChoices, generateIllustration, BEATS, BEAT_TARGET_SCENES } from '../engine/StoryEngine.js';
 import { ensureBrowserId } from '../services/identity.js';
 import { saveSnapshot, loadSnapshot, deleteSnapshot } from '../services/persistence.js';
+import { loadWorldState } from '../services/worldState.js';
 
 const ILLUSTRATION_EVERY_N = 2;
 const ILLUSTRATION_PHASE = 0;
@@ -75,6 +76,9 @@ export default function useStoryEngine() {
     // Don't clear illustration — persistedBg in StoryView keeps the
     // last image visible. New illustrations crossfade in when ready.
 
+    // Load world state for player knowledge injection
+    const worldState = loadWorldState();
+
     let fullText = '';
     try {
       const gen = streamScene(hist, loreData, {
@@ -82,6 +86,8 @@ export default function useStoryEngine() {
         playerName: profile.name,
         gender: profile.gender,
         dangerStreak: currentDanger,
+        knownLore: worldState.knownLore,
+        factionReputation: worldState.factionReputation,
       });
 
       for await (const chunk of gen) {

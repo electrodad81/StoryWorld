@@ -1,7 +1,7 @@
 // src/components/StreamingText.jsx
 // Renders text with a typewriter caret during streaming.
 
-export default function StreamingText({ text, isStreaming }) {
+export default function StreamingText({ text, isStreaming, quoted = false }) {
   // Escape HTML entities for safe rendering
   const safe = (text || '')
     .replace(/&/g, '&amp;')
@@ -11,10 +11,14 @@ export default function StreamingText({ text, isStreaming }) {
 
   const caret = isStreaming ? ' <span class="typing-caret">\u258b</span>' : '';
 
+  // Wrap in curly quotes when quoted mode is on
+  const open = quoted ? '&ldquo;' : '';
+  const close = quoted && !isStreaming ? '&rdquo;' : '';
+
   return (
     <div
       className="storybox"
-      dangerouslySetInnerHTML={{ __html: safe + caret }}
+      dangerouslySetInnerHTML={{ __html: open + safe + caret + close }}
     />
   );
 }

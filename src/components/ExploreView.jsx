@@ -7,6 +7,7 @@ import NPCConversation from './NPCConversation.jsx';
 
 export default function ExploreView({ explore, onMenuToggle }) {
   const { explorePhase } = explore;
+  const npcDispositions = explore.getNpcDispositions();
 
   return (
     <div className="explore-viewport">
@@ -34,7 +35,7 @@ export default function ExploreView({ explore, onMenuToggle }) {
           location={explore.getCurrentLocation()}
           npcs={explore.getNpcsAtLocation()}
           connections={explore.getConnectedLocations()}
-          npcDispositions={explore.npcDispositions}
+          npcDispositions={npcDispositions}
           onEngageNpc={explore.engageNpc}
           onTravel={explore.travelTo}
           onOpenMap={explore.openMap}
@@ -44,7 +45,8 @@ export default function ExploreView({ explore, onMenuToggle }) {
       {explorePhase === 'conversation' && (
         <NPCConversation
           npc={explore.activeNpc}
-          disposition={explore.npcDispositions[explore.activeNpc?.id] || 50}
+          location={explore.getCurrentLocation()}
+          disposition={npcDispositions[explore.activeNpc?.id] || 50}
           conversationHistory={explore.conversationHistory}
           isStreaming={explore.isStreaming}
           streamedText={explore.streamedText}
@@ -52,6 +54,10 @@ export default function ExploreView({ explore, onMenuToggle }) {
           isGenerating={explore.isGenerating}
           onTalk={explore.talkToNpc}
           onLeave={explore.leaveConversation}
+          exchangeCount={explore.exchangeCount}
+          maxExchanges={4}
+          questNotification={explore.questNotification}
+          nothingNewMessage={explore.nothingNewMessage}
         />
       )}
     </div>

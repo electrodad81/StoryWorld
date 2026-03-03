@@ -1,6 +1,8 @@
 // src/components/LocationView.jsx
 // Location detail view: illustration, description, NPC list, travel options.
 
+import { loadWorldState } from '../services/worldState.js';
+
 export default function LocationView({
   location,
   npcs,
@@ -11,6 +13,9 @@ export default function LocationView({
   onOpenMap,
 }) {
   if (!location) return null;
+
+  const worldState = loadWorldState();
+  const override = worldState.locationOverrides?.[location.id];
 
   return (
     <div className="location-view">
@@ -27,6 +32,9 @@ export default function LocationView({
       {/* Description */}
       <div className="location-body">
         <p className="location-description">{location.description}</p>
+        {override?.extraDetail && (
+          <p className="location-extra-detail">{override.extraDetail}</p>
+        )}
 
         {/* NPCs */}
         {npcs.length > 0 && (

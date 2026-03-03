@@ -158,6 +158,41 @@ function composePrompt(history, lore, beat) {
 }
 
 // ---------------------------------------------------------------------------
+// Player knowledge clause (world state integration)
+// ---------------------------------------------------------------------------
+
+function buildKnowledgeClause(knownLore, factionRep) {
+  const parts = [];
+
+  if (knownLore?.factions?.length) {
+    parts.push(`The protagonist is aware of these factions: ${knownLore.factions.join(', ')}.`);
+  }
+  if (knownLore?.relics?.length) {
+    parts.push(`The protagonist has heard of these relics: ${knownLore.relics.join(', ')}.`);
+  }
+  if (knownLore?.curses?.length) {
+    parts.push(`The protagonist knows of these curses: ${knownLore.curses.join(', ')}.`);
+  }
+  if (knownLore?.npcs?.length) {
+    parts.push(`The protagonist has met or heard of: ${knownLore.npcs.join(', ')}.`);
+  }
+
+  const stances = Object.entries(factionRep || {})
+    .filter(([_, rep]) => Math.abs(rep) >= 10)
+    .map(([id, rep]) => {
+      const label = rep >= 20 ? 'favorable' : rep >= 10 ? 'somewhat positive' :
+                    rep <= -20 ? 'hostile' : 'somewhat negative';
+      return `${id.replace(/_/g, ' ')}: ${label}`;
+    });
+  if (stances.length) {
+    parts.push(`Faction standing: ${stances.join(', ')}.`);
+  }
+
+  if (parts.length === 0) return '';
+  return '\nPlayer knowledge (reference naturally, do not dump exposition):\n' + parts.join(' ') + '\n';
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -171,9 +206,12 @@ export async function* streamScene(history, lore, {
   dangerStreak = 0,
   injuryLevel = 0,
   runSeed = '',
+  knownLore = null,
+  factionReputation = null,
 } = {}) {
   const prompt = composePrompt(history, lore, beat);
   const loreBlob = JSON.stringify(lore).slice(0, 20000);
+  const knowledgeClause = buildKnowledgeClause(knownLore, factionReputation);
 
   const sysBase =
     'You are the narrative engine for a PG dark-fantasy interactive story called Gloamreach.\n' +
@@ -205,6 +243,7 @@ export async function* streamScene(history, lore, {
     seedLine +
     riskControlStr +
     controlFlagsNote +
+    knowledgeClause +
     'Continue the story with the next scene. Consider the world details below.\n' +
     `--- LORE JSON ---\n${loreBlob}\n--- END LORE ---\n\n` +
     'Player history (latest last):\n' +

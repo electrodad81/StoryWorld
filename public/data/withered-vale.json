@@ -10,10 +10,20 @@
       "name": "The Crossroads",
       "description": "A junction of three muddy paths marked by a leaning signpost. The wood is too rotted to read, but someone has scratched fresh arrows into it with a knife.",
       "mood": "uneasy stillness, low wind",
-      "connections": ["thornwatch-inn", "old-mill"],
+      "connections": ["thornwatch-inn", "old-mill", "vale-graveyard"],
       "isHidden": false,
       "unlockCondition": null,
       "coverImage": "/images/explore/vale-crossroads.png"
+    },
+    {
+      "id": "vale-graveyard",
+      "name": "The Graveyard",
+      "description": "Iron fence posts lean at wrong angles around plots that have been dug and refilled too many times. Some headstones bear names; others bear only dates. Yours is here too — fresh-cut, though the moss is already creeping in.",
+      "mood": "cold silence, the smell of turned earth",
+      "connections": ["vale-crossroads"],
+      "isHidden": true,
+      "unlockCondition": "player_died",
+      "coverImage": "/images/explore/vale-graveyard.png"
     },
     {
       "id": "thornwatch-inn",
@@ -45,9 +55,115 @@
       "faction": "lantern_guild",
       "personalityTraits": ["pragmatic", "suspicious", "dry humor"],
       "baseDisposition": 40,
+      "portrait": "/images/explore/npc-maren.png",
       "greeting": "Another traveler. Sit if you like. Don't touch the ledger.",
       "backstory": "Maren runs the Thornwatch Inn and serves as an unofficial fence for the Lantern Guild. She knows everyone's secrets and trades in them carefully.",
-      "portrait": "/images/explore/npc-maren.png"
+      "dismissal": "I've said my piece. Buy a drink or move along.",
+      "nothingNew": "You again. Nothing's changed since last we spoke.",
+
+      "tiers": [
+        {
+          "dispositionRequired": 0,
+          "topics": [
+            {
+              "id": "maren_vale_gossip",
+              "subject": "Local gossip about the Vale",
+              "summary": "The roads have been quieter than usual. Traders from the east stopped coming weeks ago. Something in the fog is making people forget their routes.",
+              "loreRevealed": { "locations": ["vale-crossroads"] }
+            },
+            {
+              "id": "maren_inn_business",
+              "subject": "How business is at the inn",
+              "summary": "Business is thin. The only regulars are Edric, who pays in old coins she doesn't ask about, and the occasional Lantern Guild runner who never stays the night.",
+              "loreRevealed": { "npcs": ["Edric"], "factions": ["lantern_guild"] }
+            }
+          ]
+        },
+        {
+          "dispositionRequired": 50,
+          "topics": [
+            {
+              "id": "maren_lantern_guild",
+              "subject": "Her connection to the Lantern Guild",
+              "summary": "She's a fence — she moves goods for the Guild through the inn's cellar. Not proud of it, not ashamed either. It keeps the Vale's economy alive when the official trade routes dry up.",
+              "loreRevealed": { "factions": ["lantern_guild"] }
+            },
+            {
+              "id": "maren_edric_past",
+              "subject": "What she knows about Edric",
+              "summary": "Edric was Inquisition once — sworn and branded. He broke an oath, though she doesn't know which one. He can't leave the Vale. Something binds him here, like a leash made of guilt.",
+              "loreRevealed": { "npcs": ["Edric"], "factions": ["inquisition"] }
+            }
+          ]
+        },
+        {
+          "dispositionRequired": 70,
+          "topics": [
+            {
+              "id": "maren_ledger",
+              "subject": "The ledger behind the bar",
+              "summary": "The ledger records every debt owed to the Lantern Guild in the Vale. Names, amounts, and favors. Some entries are written in ink that moves. She doesn't know who supplies it — but Sibyl might.",
+              "loreRevealed": { "relics": ["ink_of_concord"], "npcs": ["Sibyl"] }
+            },
+            {
+              "id": "maren_sibyl_opinion",
+              "subject": "Her thoughts on Sibyl",
+              "summary": "Sibyl keeps to herself at that mill, grinding things that aren't grain. Maren suspects she supplies the ink for the ledger but has never asked directly. You don't ask Sibyl questions unless you're ready for the answer.",
+              "loreRevealed": { "npcs": ["Sibyl"], "factions": ["pale_court"] }
+            }
+          ]
+        },
+        {
+          "dispositionRequired": 85,
+          "requiresFlag": "trusts_player",
+          "topics": [
+            {
+              "id": "maren_secret",
+              "subject": "Her real fear",
+              "summary": "She's afraid the Inquisition is coming to audit the Guild's operations. If they find the ledger, everyone in it burns. She's been thinking about destroying it — but the ink won't burn. She needs someone she trusts to take it somewhere safe.",
+              "loreRevealed": { "factions": ["inquisition", "lantern_guild"], "relics": ["ink_of_concord"] }
+            },
+            {
+              "id": "maren_escape_plan",
+              "subject": "Her plan if things go wrong",
+              "summary": "She has a route out of the Vale through the Guild's old smuggling tunnels beneath the inn. But the tunnels haven't been walked in years, and the last runner who tried them came back without his shadow. Literally — it stayed behind.",
+              "loreRevealed": { "locations": ["thornwatch-inn"], "curses": ["ashen_mark"] }
+            }
+          ]
+        }
+      ],
+
+      "quests": [
+        {
+          "id": "maren_q1",
+          "type": "fetch",
+          "title": "Ask Edric about the old wards",
+          "description": "Maren wants to know if the wards around the Vale still hold. Edric would know — he helped place them.",
+          "unlockDisposition": 50,
+          "requirement": { "type": "npc_topic_revealed", "topicId": "edric_old_wards" },
+          "reward": { "dispositionBonus": 15, "loreRevealed": { "locations": ["vale-crossroads"] } },
+          "completionDialogue": "So the wards are cracking. I figured as much. ...Thank you. That's not easy news, but it's honest. I don't forget that."
+        },
+        {
+          "id": "maren_q2",
+          "type": "story_linked",
+          "title": "Survive the Veilbound Audit",
+          "description": "The Inquisition is coming. If you can survive their audit, Maren will know you can be trusted with real secrets.",
+          "unlockDisposition": 60,
+          "requirement": { "type": "hook_survived", "hookId": "HOOK-06" },
+          "reward": { "dispositionBonus": 20, "flagGranted": "trusts_player" },
+          "completionDialogue": "You lived through it. That's... more than most manage. Sit down. There's something I need to tell you."
+        }
+      ],
+      "redemptionQuest": {
+        "id": "maren_redemption",
+        "type": "story_linked",
+        "title": "Light the lanterns for the dead",
+        "description": "Maren won't deal with you. But the Lantern Guild needs someone to carry lanterns through the forest — and the dead don't care about grudges.",
+        "hookId": "HOOK-03",
+        "reward": { "dispositionBonus": 25 },
+        "completionDialogue": "You carried the lanterns. I heard. ...I don't like owing people, but I owe you that much. Sit down. We'll start over."
+      }
     },
     {
       "id": "edric",
@@ -57,9 +173,109 @@
       "faction": null,
       "personalityTraits": ["melancholic", "cryptic", "honorable despite fall"],
       "baseDisposition": 55,
+      "portrait": "/images/explore/npc-edric.png",
       "greeting": "You have the look of someone who hasn't yet learned what this place costs.",
       "backstory": "Edric was once a sworn knight of the Veilbound Inquisition. He broke an oath and now wanders the Vale, unable to leave. He knows things about the old wards.",
-      "portrait": "/images/explore/npc-edric.png"
+      "dismissal": "The road calls, and I've lingered too long already. Walk carefully.",
+      "nothingNew": "Still here? The crossroads haven't changed. Neither have I.",
+
+      "tiers": [
+        {
+          "dispositionRequired": 0,
+          "topics": [
+            {
+              "id": "edric_roads",
+              "subject": "The state of the roads",
+              "summary": "The eastern road has been swallowed by fog for three weeks now. Travelers who enter it walk in circles until they collapse. The western path is safer but takes twice as long. He walks both, because he has nowhere else to be.",
+              "loreRevealed": { "locations": ["vale-crossroads"] }
+            },
+            {
+              "id": "edric_fog_warnings",
+              "subject": "Warnings about the fog",
+              "summary": "The fog is not weather — it's a symptom. When the wards weaken, the mist thickens. Things move in it that shouldn't exist outside the old stories. He's seen them. He doesn't describe them except to say they remember your name after hearing it once.",
+              "loreRevealed": { "curses": ["salt_tongue"] }
+            }
+          ]
+        },
+        {
+          "dispositionRequired": 45,
+          "topics": [
+            {
+              "id": "edric_inquisition_past",
+              "subject": "His past with the Inquisition",
+              "summary": "He was a knight-auditor of the Veilbound Inquisition. They silence what cannot be contained — relics, curses, people who know too much. He served faithfully for eleven years. He doesn't say what changed, only that he learned the difference between order and silence.",
+              "loreRevealed": { "factions": ["inquisition"] }
+            },
+            {
+              "id": "edric_old_wards",
+              "subject": "The old wards around the Vale",
+              "summary": "The wards were placed by the Inquisition decades ago to contain something beneath the Vale. He helped maintain three of the five anchors. Two have already failed. When they all fall, what's contained won't stay contained. The anchors are at the crossroads, beneath the inn, and at the mill's well.",
+              "loreRevealed": { "locations": ["vale-crossroads", "thornwatch-inn", "old-mill"], "factions": ["inquisition"] }
+            }
+          ]
+        },
+        {
+          "dispositionRequired": 65,
+          "topics": [
+            {
+              "id": "edric_broken_oath",
+              "subject": "The oath he broke",
+              "summary": "A child in the Sunless Abbey could see through the wards — could see what the Inquisition was containing. His orders were to silence the child. He refused. He broke his oath of obedience and carried the child out. The Inquisition branded him oathbreaker, and the brand binds him to the Vale. He cannot cross its borders.",
+              "loreRevealed": { "factions": ["inquisition"], "locations": ["vale-crossroads"] }
+            },
+            {
+              "id": "edric_cant_leave",
+              "subject": "Why he can't leave the Vale",
+              "summary": "The oathbreaker's brand is a living sigil — it burns when he approaches the Vale's boundary. The pain is absolute. He's tried seventeen times. The brand was placed by the same ink that writes the Lantern Guild's ledger. Only the source of that ink might know how to unmake it.",
+              "loreRevealed": { "relics": ["ink_of_concord"], "curses": ["ashen_mark"] }
+            }
+          ]
+        },
+        {
+          "dispositionRequired": 80,
+          "requiresFlag": "respects_player",
+          "topics": [
+            {
+              "id": "edric_ward_anchors",
+              "subject": "The ward anchor locations",
+              "summary": "The five ward anchors: one beneath the crossroads signpost (intact), one in the inn's cellar behind the casks (failing), one at the mill's well (corrupted by what's below), one in the forest clearing east of the crossroads (fallen), and one he won't name — because naming it might wake what sleeps there. If someone could restore even two, it would buy the Vale another generation.",
+              "loreRevealed": { "locations": ["vale-crossroads", "thornwatch-inn", "old-mill"] }
+            }
+          ]
+        }
+      ],
+
+      "quests": [
+        {
+          "id": "edric_q1",
+          "type": "fetch",
+          "title": "Tell Sibyl the wards are failing",
+          "description": "Edric needs Sibyl to know the wards are cracking. She works with reagents that might help — but she needs to hear it from someone who's spoken to both sides.",
+          "unlockDisposition": 45,
+          "requirement": { "type": "npc_topic_revealed", "topicId": "sibyl_reagents" },
+          "reward": { "dispositionBonus": 15, "loreRevealed": { "factions": ["pale_court"] } },
+          "completionDialogue": "She knows, then. Good. Sibyl is many things, but she understands what's at stake. Perhaps between her work and what I remember... there's still time."
+        },
+        {
+          "id": "edric_q2",
+          "type": "story_linked",
+          "title": "Face the Bells in the Fog",
+          "description": "Edric knows the bells near Gloamreach are connected to the wards. If you can face them — survive or not — he'll know you understand what the Vale truly is.",
+          "unlockDisposition": 50,
+          "requirement": { "type": "hook_completed", "hookId": "HOOK-01" },
+          "reward": { "dispositionBonus": 20, "flagGranted": "respects_player" },
+          "completionDialogue": "You heard them. The bells. ...You came back different. Everyone does. But you came back, and that's what matters. Sit. I'll tell you about the anchors."
+        }
+      ],
+      "redemptionQuest": {
+        "id": "edric_redemption",
+        "type": "story_linked",
+        "title": "Deliver the last oathkeeper's vow",
+        "description": "Edric won't look you in the eye. But there's an old monk's vow that needs carrying — and the roads don't judge the hands that bear it.",
+        "hookId": "HOOK-02",
+        "reward": { "dispositionBonus": 25 },
+        "completionDialogue": "The vow reached its destination. That's... more than I expected from you. Perhaps I judged too quickly. The roads are long and I've walked them alone too long."
+      }
     },
     {
       "id": "sibyl",
@@ -69,9 +285,109 @@
       "faction": "pale_court",
       "personalityTraits": ["patient", "knowing", "speaks in riddles"],
       "baseDisposition": 30,
+      "portrait": "/images/explore/npc-sibyl.png",
       "greeting": "The wheel turns. So do you, it seems. What brings you to where things are ground down?",
       "backstory": "Sibyl tends a hidden garden behind the mill and supplies the Pale Court with rare reagents. She speaks obliquely but her advice, when understood, is always precise.",
-      "portrait": "/images/explore/npc-sibyl.png"
+      "dismissal": "The wheel turns whether you watch it or not. Go. Come back when you've ground something of your own.",
+      "nothingNew": "The wheel still turns. You still stand. Nothing new under the mist.",
+
+      "tiers": [
+        {
+          "dispositionRequired": 0,
+          "topics": [
+            {
+              "id": "sibyl_mill_sounds",
+              "subject": "The mill and its strange sounds",
+              "summary": "The waterwheel has been turning since before she arrived. No one feeds grain into it anymore, but something still grinds inside. At night, the rhythm changes — faster, then slower, as though it's breathing. She doesn't explain what it grinds. She says you'd need to go below to understand.",
+              "loreRevealed": { "locations": ["old-mill"] }
+            },
+            {
+              "id": "sibyl_garden",
+              "subject": "What grows in her garden",
+              "summary": "Behind the mill is a garden that shouldn't exist — plants that grow without sunlight, roots that move when unobserved. She tends them with care and a measure of fear. Some are reagents for the Pale Court. Others are things she grows for herself, against a day she hopes never comes.",
+              "loreRevealed": { "factions": ["pale_court"] }
+            }
+          ]
+        },
+        {
+          "dispositionRequired": 45,
+          "topics": [
+            {
+              "id": "sibyl_reagents",
+              "subject": "Her reagent work for the Pale Court",
+              "summary": "The Pale Court trades in forbidden knowledge, and she supplies the material components — inks that bind oaths, powders that reveal hidden writing, salves that let you read the dreams of the dead. It's honest work, as she sees it. Knowledge wants to be known. She merely helps it along.",
+              "loreRevealed": { "factions": ["pale_court"], "relics": ["ink_of_concord"] }
+            },
+            {
+              "id": "sibyl_wheel_purpose",
+              "subject": "The wheel's true purpose",
+              "summary": "The mill wheel doesn't grind grain. It grinds memory. The water that flows through it carries thoughts from the well below — old prayers, broken promises, forgotten names. The flour it produces is gray and smells of salt. She collects it. The Pale Court pays well for ground memory.",
+              "loreRevealed": { "locations": ["old-mill"], "factions": ["pale_court"] }
+            }
+          ]
+        },
+        {
+          "dispositionRequired": 65,
+          "topics": [
+            {
+              "id": "sibyl_pale_court_interest",
+              "subject": "The Pale Court's interest in the Vale",
+              "summary": "The Pale Court believes something is buried beneath the Vale — a remnant from before the Inquisition sealed the wards. They call it the Drowned Star. It fell before memory began, and everything strange about the Vale radiates from where it lies. The salt in the wells, the fog, the things that forget — all symptoms of a star that died underground.",
+              "loreRevealed": { "factions": ["pale_court", "inquisition"] }
+            },
+            {
+              "id": "sibyl_forbidden_knowledge",
+              "subject": "The price of forbidden knowledge",
+              "summary": "Every piece of forbidden knowledge costs something. The Pale Court's patrons pay in memories — specific ones, chosen by the Court. Sibyl has paid three times. She no longer remembers her mother's face, the sound of rain on the village she came from, or her own name before she chose 'Sibyl.' She considers it fair.",
+              "loreRevealed": { "factions": ["pale_court"], "curses": ["salt_tongue"] }
+            }
+          ]
+        },
+        {
+          "dispositionRequired": 80,
+          "requiresFlag": "curious_about_star",
+          "topics": [
+            {
+              "id": "sibyl_under_the_mill",
+              "subject": "What's actually under the mill",
+              "summary": "An old well connects to a cavern system beneath the Vale. At the bottom, the water glows faintly — not with light, but with attention. Something down there is aware. It's not the Drowned Star itself but a fragment of its consciousness, still dreaming. The well is why the wards were placed. If someone went down there with the right reagents, they might be able to speak to it. Or it might speak to them first.",
+              "loreRevealed": { "locations": ["old-mill"], "relics": ["lantern_of_second_dawn"] }
+            }
+          ]
+        }
+      ],
+
+      "quests": [
+        {
+          "id": "sibyl_q1",
+          "type": "fetch",
+          "title": "Bring word from Maren about the ledger ink",
+          "description": "Sibyl supplies the ink but wants to know what Maren has noticed about how it behaves. The ink shouldn't move on its own — if it does, something deeper is stirring.",
+          "unlockDisposition": 45,
+          "requirement": { "type": "npc_topic_revealed", "topicId": "maren_ledger" },
+          "reward": { "dispositionBonus": 15, "loreRevealed": { "relics": ["ink_of_concord"] } },
+          "completionDialogue": "The ink moves. That confirms what I feared. The fragment below is dreaming louder. ...You've done me a service. I'll remember it — which is saying something, given what I've traded away."
+        },
+        {
+          "id": "sibyl_q2",
+          "type": "story_linked",
+          "title": "Face the Drowned Star's Whisper",
+          "description": "The salt in the wells is connected to what sleeps beneath the mill. If you can face the Drowned Star's influence, Sibyl will share what she knows about the well.",
+          "unlockDisposition": 50,
+          "requirement": { "type": "hook_completed", "hookId": "HOOK-05" },
+          "reward": { "dispositionBonus": 20, "flagGranted": "curious_about_star" },
+          "completionDialogue": "You tasted the salt. You dreamed the dreams. And you're still here, asking questions instead of forgetting them. That's rare. Come — I'll show you the well."
+        }
+      ],
+      "redemptionQuest": {
+        "id": "sibyl_redemption",
+        "type": "story_linked",
+        "title": "Settle the Pale Court's debt",
+        "description": "Sibyl won't speak to you. But the Pale Court has a debt that needs settling — white sigils etched on black ledgers. Prove yourself useful and she may reconsider.",
+        "hookId": "HOOK-04",
+        "reward": { "dispositionBonus": 25 },
+        "completionDialogue": "The debt is paid. The Court remembers, even if I would rather forget. ...You're still here. Fine. Perhaps I was too hasty in my judgment."
+      }
     }
   ],
   "factions": {

@@ -879,6 +879,8 @@ img {
   display: flex;
   flex-direction: column;
   padding-top: 3rem;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .npc-header {
@@ -928,12 +930,21 @@ img {
 .npc-disposition-badge.hostile { color: var(--danger); background: rgba(192,57,43,0.15); }
 
 .npc-dialogue {
-  flex: 1;
-  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
   padding: 1rem 1.25rem;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
+}
+
+.npc-context-line {
+  font-family: 'Times New Roman', Georgia, serif;
+  font-size: 1rem;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  font-style: italic;
+  padding: 0.5rem 0.25rem 0.75rem;
 }
 
 .npc-speech {
@@ -1252,6 +1263,12 @@ img {
   margin-top: 0.5rem;
 }
 
+.graveyard-btn {
+  border-color: rgba(160, 152, 136, 0.4) !important;
+  color: var(--text-secondary) !important;
+  font-style: italic;
+}
+
 /* ================================================================
    Journal View
    ================================================================ */
@@ -1554,4 +1571,60 @@ img {
 
 .achievement-card:not(.earned) .achievement-name {
   color: var(--text-secondary);
+}
+
+/* ─── NPC Redesign: location extra detail ─── */
+
+.location-extra-detail {
+  font-family: 'Times New Roman', Georgia, serif;
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: var(--accent);
+  opacity: 0.85;
+  font-style: italic;
+  margin-top: 0.5rem;
+}
+
+/* ─── NPC Redesign: quest notification ─── */
+
+.quest-notification {
+  padding: 0.5rem 0.75rem;
+  background: rgba(200, 168, 78, 0.12);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: var(--accent);
+  margin-bottom: 0.5rem;
+  text-align: center;
+}
+
+/* ─── NPC Redesign: topic and quest option styling ─── */
+
+.choice-btn.topic-option {
+  border-left: 3px solid var(--accent);
+}
+
+.choice-btn.quest-option {
+  border-left: 3px solid #6bbd6b;
+}
+
+/* ─── NPC Redesign: exchange counter ─── */
+
+.exchange-counter {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  text-align: center;
+  padding: 0.25rem 0;
+  opacity: 0.6;
+}
+
+/* ─── NPC Redesign: nothing new state ─── */
+
+.npc-nothing-new {
+  font-family: 'Times New Roman', Georgia, serif;
+  font-size: 1rem;
+  color: var(--text-secondary);
+  font-style: italic;
+  padding: 1rem;
+  text-align: center;
 }

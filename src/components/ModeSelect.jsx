@@ -1,5 +1,6 @@
 // src/components/ModeSelect.jsx
 // Three-card mode selection: Story, Explore (gated), Journal.
+// Reset Everything now also clears world state.
 
 export default function ModeSelect({ onSelectMode, explorationUnlocked, hasJournalEntries, onResetJournal, onResetAll }) {
   return (
